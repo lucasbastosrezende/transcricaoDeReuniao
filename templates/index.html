@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-tema="escuro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcritor pt-BR</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎙️</text></svg>">
+</head>
+<body>
+
+<header class="topo">
+  <div class="topo-marca">
+    <span class="topo-logo">🎙️</span>
+    <div>
+      <h1>Transcritor <span class="acento">pt-BR</span></h1>
+      <p id="topoHardware" class="topo-sub">Carregando informações do sistema...</p>
+    </div>
+  </div>
+  <div class="topo-acoes">
+    <button type="button" id="btnHistorico" class="btn-icone" title="Transcrições anteriores">🗂️</button>
+    <button type="button" id="btnTema" class="btn-icone" title="Alternar tema (T)">🌙</button>
+  </div>
+</header>
+
+<main class="pagina">
+
+  <!-- ============ AVISO DE AMBIENTE ============ -->
+  <div id="avisoFfmpeg" class="alerta oculto">
+    <strong>FFmpeg não encontrado.</strong>
+    Sem ele não é possível ler o áudio dos vídeos. Instale com
+    <code>winget install Gyan.FFmpeg</code> e reinicie o programa.
+  </div>
+
+  <!-- ============ ETAPA 1: ENVIO ============ -->
+  <section class="cartao" id="telaEnvio">
+    <form id="formulario">
+      <div class="area-solta" id="areaSolta" tabindex="0" role="button" aria-label="Selecionar arquivo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="area-icone">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+        <h2>Arraste o vídeo ou áudio aqui</h2>
+        <p class="area-dica">MP4, MKV, MOV, MP3, WAV e outros — sem limite de tamanho ou duração</p>
+        <span class="btn btn-suave">Escolher do computador</span>
+        <input type="file" id="entradaArquivo" hidden>
+      </div>
+
+      <div class="arquivo oculto" id="arquivoEscolhido">
+        <span class="arquivo-selo" id="arquivoExt">MP4</span>
+        <div class="arquivo-dados">
+          <strong id="arquivoNome">arquivo.mp4</strong>
+          <span id="arquivoInfo" class="tenue">—</span>
+        </div>
+        <button type="button" class="btn-icone" id="btnTrocarArquivo" title="Remover">✕</button>
+      </div>
+
+      <div class="opcoes">
+        <label class="campo">
+          <span class="campo-titulo">Modelo de reconhecimento</span>
+          <select id="selModelo"></select>
+          <small id="dicaModelo" class="tenue">&nbsp;</small>
+        </label>
+
+        <label class="campo">
+          <span class="campo-titulo">Perfil de decodificação</span>
+          <select id="selPerfil"></select>
+          <small id="dicaPerfil" class="tenue">&nbsp;</small>
+        </label>
+
+        <label class="campo">
+          <span class="campo-titulo">Idioma do áudio</span>
+          <select id="selIdioma">
+            <option value="pt" selected>Português do Brasil</option>
+            <option value="auto">Detectar automaticamente</option>
+            <option value="en">Inglês</option>
+            <option value="es">Espanhol</option>
+          </select>
+          <small class="tenue">Fixar o idioma evita trocas de língua no meio do texto.</small>
+        </label>
+
+        <label class="campo campo-largo">
+          <span class="campo-titulo">
+            Vocabulário do seu contexto
+            <span class="etiqueta">melhora nomes próprios</span>
+          </span>
+          <input type="text" id="campoVocabulario"
+                 placeholder="Ex.: Petrobras, CNPJ, Dra. Marcela Bittencourt, SISCOMEX, Lucas Rezende">
+          <small class="tenue">Nomes, siglas e jargões separados por vírgula. O modelo passa a esperar essas palavras.</small>
+        </label>
+      </div>
+
+      <button type="submit" class="btn btn-principal btn-largo" id="btnIniciar" disabled>
+        Iniciar transcrição
+      </button>
+    </form>
+  </section>
+
+  <!-- ============ ETAPA 2: PROGRESSO ============ -->
+  <section class="cartao oculto" id="telaProgresso">
+    <div class="prog-topo">
+      <div class="prog-anel" id="progAnel"><span id="progNumero">0%</span></div>
+      <div class="prog-texto">
+        <h2 id="progEtapa">Preparando...</h2>
+        <p id="progDetalhe" class="tenue">Enviando o arquivo para o servidor.</p>
+        <p id="progEta" class="tenue mono"></p>
+      </div>
+      <button type="button" class="btn btn-perigo" id="btnCancelar">Cancelar</button>
+    </div>
+
+    <div class="barra"><div class="barra-preenchida" id="progBarra"></div></div>
+
+    <div class="feed">
+      <div class="feed-cabecalho">
+        <span>Texto reconhecido até agora</span>
+        <span id="feedContagem" class="tenue mono">0 trechos</span>
+      </div>
+      <div class="feed-corpo" id="feedCorpo">
+        <p class="tenue">Os trechos aparecem aqui conforme são reconhecidos.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ ETAPA 3: RESULTADO ============ -->
+  <section class="cartao oculto" id="telaResultado">
+    <div class="res-cabecalho">
+      <div>
+        <h2>Transcrição concluída</h2>
+        <p id="resArquivo" class="tenue"></p>
+      </div>
+      <div class="res-botoes">
+        <button type="button" class="btn btn-suave" id="btnNova">Nova transcrição</button>
+        <div class="menu">
+          <button type="button" class="btn btn-principal" id="btnBaixar">Baixar ▾</button>
+          <div class="menu-lista oculto" id="menuBaixar"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="metricas" id="resMetricas"></div>
+
+    <div class="player oculto" id="player">
+      <audio id="audio" preload="metadata"></audio>
+      <button type="button" class="btn-play" id="btnPlay" title="Reproduzir (espaço)">▶</button>
+      <div class="player-trilha" id="playerTrilha"><div class="player-progresso" id="playerProgresso"></div></div>
+      <span class="mono tenue" id="playerTempo">00:00 / 00:00</span>
+      <select id="selVelocidade" class="player-vel" title="Velocidade">
+        <option value="0.75">0,75×</option>
+        <option value="1" selected>1×</option>
+        <option value="1.25">1,25×</option>
+        <option value="1.5">1,5×</option>
+        <option value="2">2×</option>
+      </select>
+    </div>
+
+    <div class="ferramentas">
+      <div class="busca">
+        <input type="search" id="campoBusca" placeholder="Buscar no texto...">
+        <span id="buscaResultado" class="tenue mono"></span>
+      </div>
+      <div class="abas" role="tablist">
+        <button type="button" class="aba ativa" data-aba="abaTexto">Texto</button>
+        <button type="button" class="aba" data-aba="abaTrechos">Trechos</button>
+        <button type="button" class="aba" data-aba="abaLegendas">Legendas</button>
+      </div>
+      <button type="button" class="btn btn-suave btn-pequeno" id="btnCopiar">Copiar</button>
+    </div>
+
+    <div class="painel ativo" id="abaTexto">
+      <div class="texto" id="textoCompleto" contenteditable="true" spellcheck="true"></div>
+      <p class="tenue rodape-dica">O texto é editável: corrija aqui antes de copiar.</p>
+    </div>
+
+    <div class="painel" id="abaTrechos">
+      <div class="trechos" id="listaTrechos"></div>
+    </div>
+
+    <div class="painel" id="abaLegendas">
+      <div class="trechos" id="listaLegendas"></div>
+    </div>
+  </section>
+
+  <!-- ============ HISTÓRICO ============ -->
+  <section class="cartao oculto" id="telaHistorico">
+    <div class="res-cabecalho">
+      <h2>Transcrições anteriores</h2>
+      <button type="button" class="btn btn-suave" id="btnFecharHistorico">Fechar</button>
+    </div>
+    <div id="listaHistorico"></div>
+  </section>
+
+</main>
+
+<div class="aviso oculto" id="aviso"></div>
+<script src="/static/script.js"></script>
+</body>
+</html>
