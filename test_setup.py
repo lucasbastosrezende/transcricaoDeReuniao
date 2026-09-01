@@ -1,26 +1,47 @@
 """Verificação do ambiente: roda antes de abrir o programa pela primeira vez.
 
 Uso:  .venv\\Scripts\\python.exe test_setup.py
+
+Cada item marcado com [!!] impede o programa de funcionar; os marcados com
+[--] só desligam um recurso opcional e não travam a inicialização.
 """
 import os
 import shutil
+import sqlite3
 import sys
 
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
 
 OK = "[ok]"
 FALHA = "[!!]"
+AVISO = "[--]"
 falhas = 0
 
 
-def verificar(titulo: str, condicao: bool, detalhe: str = "", dica: str = "") -> None:
+def verificar(titulo: str, condicao: bool, detalhe: str = "", dica: str = "",
+              obrigatorio: bool = True) -> None:
     global falhas
-    print(f"{OK if condicao else FALHA} {titulo}" + (f": {detalhe}" if detalhe else ""))
+    marca = OK if condicao else (FALHA if obrigatorio else AVISO)
+    print(f"{marca} {titulo}" + (f": {detalhe}" if detalhe else ""))
     if not condicao:
-        falhas += 1
+        if obrigatorio:
+            falhas += 1
         if dica:
             print(f"     -> {dica}")
+
+
+def _fts5_disponivel() -> bool:
+    try:
+        conexao = sqlite3.connect(":memory:")
+        conexao.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+        conexao.close()
+        return True
+    except sqlite3.Error:
+        return False
 
 
 def main() -> int:
@@ -39,12 +60,16 @@ def main() -> int:
     except ImportError as exc:
         verificar("faster-whisper", False, str(exc), "pip install -r requirements.txt")
 
-    for modulo in ("fastapi", "uvicorn", "jinja2", "multipart", "ctranslate2"):
+    for modulo in ("fastapi", "uvicorn", "jinja2", "multipart", "ctranslate2", "numpy"):
         try:
             mod = __import__(modulo)
             verificar(modulo, True, getattr(mod, "__version__", "instalado"))
         except ImportError:
-            verificar(modulo, False, "ausente", "pip install -r requirements.txt")
+            obrigatorio = modulo != "numpy"
+            verificar(modulo, False, "ausente",
+                      "pip install -r requirements.txt"
+                      if obrigatorio else "sem numpy nao ha diarizacao nem forma de onda",
+                      obrigatorio=obrigatorio)
 
     import media
     verificar("FFmpeg", media.ffmpeg_available(), media.find_ffmpeg(),
@@ -53,10 +78,27 @@ def main() -> int:
               media.find_ffprobe(), "Vem junto com o FFmpeg.")
 
     import config
+    import store
     import transcriber
+
+    verificar("Busca no historico (SQLite FTS5)", _fts5_disponivel(),
+              "fts5" if _fts5_disponivel() else "ausente",
+              "A busca global cai para LIKE, mais lenta porem funcional.",
+              obrigatorio=False)
+    verificar("Banco de historico", store.available(), config.DB_PATH,
+              "Verifique a permissao de escrita na pasta outputs.", obrigatorio=False)
 
     motor_cpu = transcriber.Transcriber._detect_device()
     print(f"{OK} Aceleracao: {motor_cpu[0]} ({motor_cpu[1]}), {os.cpu_count()} nucleos")
+
+    print("\nRecursos ligados:")
+    for nome, ligado in (
+        ("separacao de falantes", config.DIARIZE),
+        ("resumo e capitulos", config.ANALYZE),
+        ("tratamento do audio", config.AUDIO_PREPROCESS),
+        ("token de autenticacao", bool(config.AUTH_TOKEN)),
+    ):
+        print(f"  - {nome:<26} {'sim' if ligado else 'nao'}")
 
     print("\nModelos:")
     for modelo in config.MODEL_CATALOG:

@@ -15,21 +15,33 @@ set "UV=%USERPROFILE%\.local\bin\uv.exe"
 set "PY=.venv\Scripts\python.exe"
 
 :: ---------------------------------------------------------------- Python
-if exist "%PY%" (
-    echo [ok] Ambiente Python encontrado.
-    goto FFMPEG
-)
+if not exist "%PY%" goto CRIAR_AMBIENTE
 
-echo [..] Criando o ambiente Python pela primeira vez...
+:: Um .venv pode existir e nao funcionar: basta a instalacao do Python que
+:: ele aponta ter sido movida, renomeada ou removida. Testar de verdade e
+:: mais barato que descobrir isso no meio de uma transcricao de duas horas.
+"%PY%" -c "import sys" > NUL 2>&1
+if errorlevel 1 (
+    echo [!!] O ambiente Python existe mas nao funciona ^(instalacao base removida?^).
+    echo [..] Recriando do zero...
+    rmdir /s /q .venv
+    goto CRIAR_AMBIENTE
+)
+echo [ok] Ambiente Python encontrado.
+goto CONFERIR_DEPENDENCIAS
+
+:CRIAR_AMBIENTE
+echo [..] Criando o ambiente Python...
 
 if exist "%UV%" goto USAR_UV
 
-where python >nul 2>nul
+where python > NUL 2>&1
 if %errorlevel% equ 0 (
     python -m venv .venv
-    "%PY%" -m pip install --upgrade pip
-    "%PY%" -m pip install -r requirements.txt
-    goto FFMPEG
+    if exist "%PY%" (
+        "%PY%" -m pip install --upgrade pip
+        goto INSTALAR_DEPENDENCIAS
+    )
 )
 
 echo [..] Python nao encontrado. Instalando o gerenciador uv...
@@ -37,8 +49,6 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 :USAR_UV
 "%UV%" venv --python 3.11 .venv
-"%UV%" pip install --python "%PY%" -r requirements.txt
-
 if not exist "%PY%" (
     echo.
     echo [ERRO] Nao foi possivel preparar o ambiente Python.
@@ -46,9 +56,35 @@ if not exist "%PY%" (
     exit /b 1
 )
 
+:INSTALAR_DEPENDENCIAS
+echo [..] Instalando as dependencias ^(alguns minutos na primeira vez^)...
+if exist "%UV%" (
+    "%UV%" pip install --python "%PY%" -r requirements.txt
+) else (
+    "%PY%" -m pip install -r requirements.txt
+)
+if errorlevel 1 (
+    echo.
+    echo [ERRO] A instalacao das dependencias falhou. Verifique sua conexao.
+    pause
+    exit /b 1
+)
+copy /y requirements.txt ".venv\requirements.lock" > NUL
+goto FFMPEG
+
+:CONFERIR_DEPENDENCIAS
+:: Comparacao binaria com a copia guardada na ultima instalacao: se o
+:: requirements.txt mudou, as dependencias sao reinstaladas sozinhas.
+if not exist ".venv\requirements.lock" goto INSTALAR_DEPENDENCIAS
+fc /b requirements.txt ".venv\requirements.lock" > NUL 2>&1
+if errorlevel 1 (
+    echo [..] O requirements.txt mudou desde a ultima execucao.
+    goto INSTALAR_DEPENDENCIAS
+)
+
 :: ---------------------------------------------------------------- FFmpeg
 :FFMPEG
-where ffmpeg >nul 2>nul
+where ffmpeg > NUL 2>&1
 if %errorlevel% neq 0 (
     if not exist "%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe" (
         echo [..] FFmpeg nao encontrado. Instalando via WinGet...
@@ -59,7 +95,7 @@ if %errorlevel% neq 0 (
 :: --------------------------------------------------------------- Verifica
 echo.
 "%PY%" test_setup.py
-if %errorlevel% neq 0 (
+if errorlevel 1 (
     echo.
     echo Resolva os itens marcados com [!!] acima e execute novamente.
     pause

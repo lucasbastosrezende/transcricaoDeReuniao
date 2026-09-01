@@ -1,0 +1,42 @@
+# Ambiente Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Dados do usuário: mídia enviada, transcrições geradas e o índice do histórico.
+# Nada disso pertence ao repositório — são arquivos pessoais e pesados
+# (um vídeo de uma hora passa de 500 MB, muito acima do limite do GitHub).
+uploads/
+uploads_recuperados/
+outputs/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Mídia solta na raiz do projeto
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.opus
+
+# Configuração local com caminhos e tokens da máquina
+.env
+
+# Sistema operacional e editores
+Thumbs.db
+desktop.ini
+.DS_Store
+.idea/
+.vscode/
+*.swp

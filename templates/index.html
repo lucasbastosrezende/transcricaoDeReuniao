@@ -21,7 +21,9 @@
     </div>
   </div>
   <div class="topo-acoes">
-    <button type="button" id="btnHistorico" class="btn-icone" title="Transcrições anteriores">🗂️</button>
+    <button type="button" id="btnBuscaGlobal" class="btn-icone" title="Buscar em todas as transcrições (G)">🔍</button>
+    <button type="button" id="btnHistorico" class="btn-icone" title="Transcrições anteriores (H)">🗂️</button>
+    <button type="button" id="btnAtalhos" class="btn-icone" title="Atalhos de teclado (?)">⌨️</button>
     <button type="button" id="btnTema" class="btn-icone" title="Alternar tema (T)">🌙</button>
   </div>
 </header>
@@ -38,24 +40,17 @@
   <!-- ============ ETAPA 1: ENVIO ============ -->
   <section class="cartao" id="telaEnvio">
     <form id="formulario">
-      <div class="area-solta" id="areaSolta" tabindex="0" role="button" aria-label="Selecionar arquivo">
+      <div class="area-solta" id="areaSolta" tabindex="0" role="button" aria-label="Selecionar arquivos">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="area-icone">
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
         </svg>
-        <h2>Arraste o vídeo ou áudio aqui</h2>
-        <p class="area-dica">MP4, MKV, MOV, MP3, WAV e outros — sem limite de tamanho ou duração</p>
+        <h2>Arraste os vídeos ou áudios aqui</h2>
+        <p class="area-dica">Vários de uma vez — eles entram numa fila. MP4, MKV, MOV, MP3, WAV e outros, sem limite de tamanho ou duração</p>
         <span class="btn btn-suave">Escolher do computador</span>
-        <input type="file" id="entradaArquivo" hidden>
+        <input type="file" id="entradaArquivo" multiple hidden>
       </div>
 
-      <div class="arquivo oculto" id="arquivoEscolhido">
-        <span class="arquivo-selo" id="arquivoExt">MP4</span>
-        <div class="arquivo-dados">
-          <strong id="arquivoNome">arquivo.mp4</strong>
-          <span id="arquivoInfo" class="tenue">—</span>
-        </div>
-        <button type="button" class="btn-icone" id="btnTrocarArquivo" title="Remover">✕</button>
-      </div>
+      <div class="lista-arquivos oculto" id="listaArquivos"></div>
 
       <div class="opcoes">
         <label class="campo">
@@ -88,8 +83,26 @@
           </span>
           <input type="text" id="campoVocabulario"
                  placeholder="Ex.: Petrobras, CNPJ, Dra. Marcela Bittencourt, SISCOMEX, Lucas Rezende">
-          <small class="tenue">Nomes, siglas e jargões separados por vírgula. O modelo passa a esperar essas palavras.</small>
+          <small class="tenue">Nomes, siglas e jargões separados por vírgula. O modelo passa a esperar essas palavras — e a grafia que você digitar é a que vai para o texto final.</small>
         </label>
+
+        <div class="campo campo-largo">
+          <span class="campo-titulo">Processamento extra</span>
+          <div class="interruptores">
+            <label class="interruptor">
+              <input type="checkbox" id="optFalantes" checked>
+              <span><strong>Separar falantes</strong><small>Marca quem falou cada trecho comparando as vozes. Custa alguns segundos.</small></span>
+            </label>
+            <label class="interruptor">
+              <input type="checkbox" id="optAnalise" checked>
+              <span><strong>Resumo e capítulos</strong><small>Extrai os pontos principais, os temas e as pendências mencionadas.</small></span>
+            </label>
+            <label class="interruptor">
+              <input type="checkbox" id="optVicios">
+              <span><strong>Remover vícios de linguagem</strong><small>Tira "né", "tipo", "ãã" e hesitações. Deixa o texto mais limpo e menos fiel.</small></span>
+            </label>
+          </div>
+        </div>
       </div>
 
       <button type="submit" class="btn btn-principal btn-largo" id="btnIniciar" disabled>
@@ -104,6 +117,7 @@
       <div class="prog-anel" id="progAnel"><span id="progNumero">0%</span></div>
       <div class="prog-texto">
         <h2 id="progEtapa">Preparando...</h2>
+        <p id="progArquivo" class="tenue forte"></p>
         <p id="progDetalhe" class="tenue">Enviando o arquivo para o servidor.</p>
         <p id="progEta" class="tenue mono"></p>
       </div>
@@ -111,6 +125,14 @@
     </div>
 
     <div class="barra"><div class="barra-preenchida" id="progBarra"></div></div>
+
+    <div class="fila oculto" id="filaLote">
+      <div class="feed-cabecalho">
+        <span>Fila deste envio</span>
+        <span id="filaContagem" class="tenue mono"></span>
+      </div>
+      <div id="filaItens"></div>
+    </div>
 
     <div class="feed">
       <div class="feed-cabecalho">
@@ -127,7 +149,7 @@
   <section class="cartao oculto" id="telaResultado">
     <div class="res-cabecalho">
       <div>
-        <h2>Transcrição concluída</h2>
+        <h2 id="resTitulo">Transcrição concluída</h2>
         <p id="resArquivo" class="tenue"></p>
       </div>
       <div class="res-botoes">
@@ -143,55 +165,119 @@
 
     <div class="player oculto" id="player">
       <audio id="audio" preload="metadata"></audio>
-      <button type="button" class="btn-play" id="btnPlay" title="Reproduzir (espaço)">▶</button>
-      <div class="player-trilha" id="playerTrilha"><div class="player-progresso" id="playerProgresso"></div></div>
-      <span class="mono tenue" id="playerTempo">00:00 / 00:00</span>
-      <select id="selVelocidade" class="player-vel" title="Velocidade">
-        <option value="0.75">0,75×</option>
-        <option value="1" selected>1×</option>
-        <option value="1.25">1,25×</option>
-        <option value="1.5">1,5×</option>
-        <option value="2">2×</option>
-      </select>
+      <div class="player-linha">
+        <button type="button" class="btn-play" id="btnPlay" title="Reproduzir (espaço)">▶</button>
+        <canvas id="onda" class="onda" height="54"></canvas>
+        <span class="mono tenue" id="playerTempo">00:00 / 00:00</span>
+        <select id="selVelocidade" class="player-vel" title="Velocidade">
+          <option value="0.75">0,75×</option>
+          <option value="1" selected>1×</option>
+          <option value="1.25">1,25×</option>
+          <option value="1.5">1,5×</option>
+          <option value="2">2×</option>
+        </select>
+      </div>
     </div>
 
     <div class="ferramentas">
       <div class="busca">
-        <input type="search" id="campoBusca" placeholder="Buscar no texto...">
+        <input type="search" id="campoBusca" placeholder="Buscar nesta transcrição... (/)">
         <span id="buscaResultado" class="tenue mono"></span>
       </div>
       <div class="abas" role="tablist">
         <button type="button" class="aba ativa" data-aba="abaTexto">Texto</button>
         <button type="button" class="aba" data-aba="abaTrechos">Trechos</button>
+        <button type="button" class="aba" data-aba="abaResumo">Resumo</button>
         <button type="button" class="aba" data-aba="abaLegendas">Legendas</button>
+        <button type="button" class="aba" data-aba="abaDados">Números</button>
       </div>
       <button type="button" class="btn btn-suave btn-pequeno" id="btnCopiar">Copiar</button>
     </div>
 
+    <div class="filtros oculto" id="filtros">
+      <div class="chips" id="chipsFalantes"></div>
+      <label class="marca-caixa">
+        <input type="checkbox" id="optSoBaixa">
+        <span>Só trechos de baixa confiança</span>
+      </label>
+    </div>
+
     <div class="painel ativo" id="abaTexto">
-      <div class="texto" id="textoCompleto" contenteditable="true" spellcheck="true"></div>
-      <p class="tenue rodape-dica">O texto é editável: corrija aqui antes de copiar.</p>
+      <div class="texto" id="textoCompleto"></div>
+      <p class="tenue rodape-dica">Para corrigir o texto, use a aba <strong>Trechos</strong>: lá a edição é salva e todos os arquivos são gerados de novo.</p>
     </div>
 
     <div class="painel" id="abaTrechos">
+      <div class="aviso-edicao">
+        <span>Clique em qualquer trecho para editar. O tempo é preservado.</span>
+        <button type="button" class="btn btn-principal btn-pequeno oculto" id="btnSalvarEdicao">Salvar correções</button>
+      </div>
       <div class="trechos" id="listaTrechos"></div>
     </div>
 
+    <div class="painel" id="abaResumo">
+      <div id="conteudoResumo"></div>
+    </div>
+
     <div class="painel" id="abaLegendas">
+      <div id="qaLegendas" class="qa"></div>
       <div class="trechos" id="listaLegendas"></div>
+    </div>
+
+    <div class="painel" id="abaDados">
+      <div id="conteudoDados"></div>
     </div>
   </section>
 
   <!-- ============ HISTÓRICO ============ -->
   <section class="cartao oculto" id="telaHistorico">
     <div class="res-cabecalho">
-      <h2>Transcrições anteriores</h2>
+      <div>
+        <h2>Transcrições anteriores</h2>
+        <p id="histResumo" class="tenue"></p>
+      </div>
       <button type="button" class="btn btn-suave" id="btnFecharHistorico">Fechar</button>
     </div>
     <div id="listaHistorico"></div>
   </section>
 
+  <!-- ============ BUSCA GLOBAL ============ -->
+  <section class="cartao oculto" id="telaBusca">
+    <div class="res-cabecalho">
+      <div>
+        <h2>Buscar em tudo que já foi transcrito</h2>
+        <p class="tenue">Acentos são ignorados. Use aspas para procurar a frase exata.</p>
+      </div>
+      <button type="button" class="btn btn-suave" id="btnFecharBusca">Fechar</button>
+    </div>
+    <input type="search" id="campoBuscaGlobal" placeholder="Ex.: contrato da prefeitura, &quot;nota fiscal&quot;...">
+    <div id="resultadosBusca"></div>
+  </section>
+
 </main>
+
+<!-- ============ ATALHOS ============ -->
+<div class="modal oculto" id="modalAtalhos">
+  <div class="modal-caixa">
+    <div class="res-cabecalho">
+      <h2>Atalhos de teclado</h2>
+      <button type="button" class="btn-icone" id="btnFecharAtalhos">✕</button>
+    </div>
+    <table class="atalhos">
+      <tr><td><kbd>espaço</kbd></td><td>Reproduzir ou pausar</td></tr>
+      <tr><td><kbd>←</kbd> <kbd>→</kbd></td><td>Voltar ou avançar 5 segundos</td></tr>
+      <tr><td><kbd>J</kbd> <kbd>L</kbd></td><td>Voltar ou avançar 10 segundos</td></tr>
+      <tr><td><kbd>,</kbd> <kbd>.</kbd></td><td>Trecho anterior ou seguinte</td></tr>
+      <tr><td><kbd>-</kbd> <kbd>+</kbd></td><td>Diminuir ou aumentar a velocidade</td></tr>
+      <tr><td><kbd>/</kbd></td><td>Buscar nesta transcrição</td></tr>
+      <tr><td><kbd>G</kbd></td><td>Buscar em todas as transcrições</td></tr>
+      <tr><td><kbd>H</kbd></td><td>Histórico</td></tr>
+      <tr><td><kbd>T</kbd></td><td>Alternar tema claro/escuro</td></tr>
+      <tr><td><kbd>?</kbd></td><td>Esta lista</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>Fechar o que estiver aberto</td></tr>
+    </table>
+  </div>
+</div>
 
 <div class="aviso oculto" id="aviso"></div>
 <script src="/static/script.js"></script>

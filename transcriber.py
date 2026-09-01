@@ -10,7 +10,13 @@ Decisões que mais afetam a qualidade do resultado, e o porquê de cada uma:
   Além de acelerar, ele impede que o modelo arraste contexto entre blocos, o
   que é a origem mais comum das alucinações em áudios longos.
 * **Tempo por palavra** ligado sempre. É o que permite montar legendas com
-  quebras corretas e destacar a palavra falada durante a reprodução.
+  quebras corretas, destacar a palavra falada durante a reprodução e medir a
+  confiança de cada frase separadamente.
+
+Depois da decodificação vem uma esteira de pós-processamento que é onde mora
+boa parte do valor: separação de falantes, divisão em frases com tempo exato,
+limpeza tipográfica do português, montagem das legendas e leitura automática
+do conteúdo (resumo, temas, capítulos).
 """
 import gc
 import logging
@@ -22,7 +28,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from faster_whisper import BatchedInferencePipeline, WhisperModel
 
+import analysis
 import config
+import diarize
 import media
 import ptbr
 from media import TranscriptionCancelled
@@ -133,6 +141,7 @@ class Transcriber:
             "compute_type": self.compute_type,
             "cpu_threads": self.cpu_threads,
             "gpu": self.device == "cuda",
+            "modelo_carregado": next(iter(self._models), None),
         }
 
     # --- Modelos --------------------------------------------------------
@@ -174,6 +183,9 @@ class Transcriber:
         on_segment: Optional[Callable[[Dict[str, Any]], None]] = None,
         cancel_event: Optional[threading.Event] = None,
         keep_audio_preview: bool = config.KEEP_AUDIO_PREVIEW,
+        diarizar: bool = config.DIARIZE,
+        analisar: bool = config.ANALYZE,
+        remover_vicios: bool = False,
     ) -> Dict[str, Any]:
         """Transcreve um arquivo de áudio ou vídeo inteiro.
 
@@ -183,6 +195,7 @@ class Transcriber:
         """
         settings = config.PROFILES.get(profile, config.PROFILES[config.DEFAULT_PROFILE])
         os.makedirs(output_dir, exist_ok=True)
+        started_at = time.monotonic()
 
         def report(percent: float, stage: str, detail: str = "") -> None:
             if on_progress:
@@ -195,6 +208,7 @@ class Transcriber:
         base_name = os.path.splitext(os.path.basename(input_path))[0]
         wav_path = os.path.join(output_dir, f"{base_name}.wav")
         preview_path = os.path.join(output_dir, "preview.m4a") if keep_audio_preview else None
+        terms = [t.strip() for t in vocabulary.replace(";", ",").split(",") if t.strip()]
 
         try:
             # 1. Inspeção -------------------------------------------------
@@ -206,7 +220,13 @@ class Transcriber:
             total_duration = info.get("duration", 0.0)
 
             # 2. Extração de áudio ---------------------------------------
-            report(3.0, "Extraindo o áudio", "Convertendo para 16 kHz mono com o FFmpeg...")
+            filtros = config.AUDIO_FILTERS if config.AUDIO_PREPROCESS else None
+            report(
+                3.0,
+                "Extraindo o áudio",
+                "Convertendo para 16 kHz mono e nivelando o volume..."
+                if filtros else "Convertendo para 16 kHz mono com o FFmpeg...",
+            )
             media.extract_audio(
                 input_path,
                 wav_path,
@@ -219,6 +239,7 @@ class Transcriber:
                     f"{frac * 100:.0f}% do áudio convertido",
                 ),
                 cancel_event=cancel_event,
+                filters=filtros,
             )
             if total_duration <= 0:
                 total_duration = media.get_duration(wav_path)
@@ -249,7 +270,7 @@ class Transcriber:
                 f"Perfil {settings['nome'].lower()} · {self.cpu_threads} núcleos · {model_name}",
             )
 
-            hotwords = vocabulary.strip() or None
+            hotwords = ", ".join(terms) if terms else None
             segments_iter, whisper_info = engine.transcribe(
                 wav_path,
                 language=language or None,
@@ -331,30 +352,74 @@ class Transcriber:
             finally:
                 pacer.stop()
 
+            if not segments:
+                raise RuntimeError(
+                    "Nenhuma fala foi reconhecida neste arquivo. "
+                    "Verifique se o áudio tem voz audível e não apenas música ou ruído."
+                )
+
             # 5. Consolidação ---------------------------------------------
             check_cancel()
-            report(96.0, "Revisando o texto", "Corrigindo pontuação, laços e quebras de legenda...")
-            cues = ptbr.build_cues(segments)
-            # Blocos longos viram frases só depois de montar as legendas, que
-            # precisam do fluxo contínuo de palavras para casar as quebras.
+            report(94.0, "Revisando o texto", "Corrigindo pontuação, laços e quebras de frase...")
+            # As frases precisam existir antes da diarização: uma assinatura
+            # vocal medida sobre 30 segundos de bloco misturaria duas pessoas.
             segments = ptbr.split_into_sentences(segments)
             segments = ptbr.drop_repeated_segments(segments)
             for index, segment in enumerate(segments, start=1):
                 segment["id"] = index
 
+            # 6. Falantes --------------------------------------------------
+            diarization: Optional[Dict[str, Any]] = None
+            if diarizar:
+                check_cancel()
+                report(95.0, "Separando os falantes", "Comparando as assinaturas de voz...")
+                try:
+                    diarization = diarize.assign_speakers(wav_path, segments)
+                except Exception as exc:  # noqa: BLE001 - extra, nunca obrigatório
+                    logger.warning("Diarização indisponível: %s", exc)
+
+            # 7. Texto final ----------------------------------------------
+            check_cancel()
+            report(96.0, "Montando o documento", "Parágrafos, legendas e vocabulário...")
+            if remover_vicios:
+                for segment in segments:
+                    segment["text"] = ptbr.strip_fillers(segment["text"])
+                segments = [s for s in segments if s["text"].strip()]
+            if terms:
+                for segment in segments:
+                    segment["text"] = ptbr.apply_vocabulary(segment["text"], terms)
+
+            cues = ptbr.build_cues(segments)
             paragraphs = ptbr.build_paragraphs(segments)
+            dialogue = ptbr.build_dialogue(segments) if diarization else []
             full_text = "\n\n".join(paragraphs)
             plain_text = ptbr.capitalize_sentences(
                 ptbr.clean_text(" ".join(s["text"] for s in segments))
             )
 
+            # 8. Leitura automática ---------------------------------------
+            conteudo: Dict[str, Any] = {}
+            if analisar:
+                check_cancel()
+                report(97.0, "Lendo o conteúdo", "Resumo, temas e capítulos...")
+                try:
+                    conteudo = analysis.analyze(segments, total_duration)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Análise de conteúdo falhou: %s", exc)
+
+            # 9. Forma de onda --------------------------------------------
+            report(99.0, "Finalizando", "Desenhando a forma de onda...")
+            waveform = media.waveform_peaks(wav_path) if preview_path else []
+
             confidences = [s["confidence"] for s in segments if s["confidence"] > 0]
             speech_time = sum(s["end"] - s["start"] for s in segments)
+            elapsed = max(0.001, time.monotonic() - started_at)
 
             report(100.0, "Concluído", "Transcrição pronta.")
 
             return {
                 "success": True,
+                "versao": config.VERSION,
                 "duration": round(total_duration, 2),
                 "speech_duration": round(speech_time, 2),
                 "language": detected_language,
@@ -362,16 +427,27 @@ class Transcriber:
                 "model": model_name,
                 "profile": profile,
                 "device": self.device,
+                "compute_type": self.compute_type,
                 "segments": segments,
                 "cues": cues,
                 "paragraphs": paragraphs,
+                "dialogue": dialogue,
                 "full_text": full_text,
                 "plain_text": plain_text,
                 "word_count": len(plain_text.split()),
                 "avg_confidence": round(sum(confidences) / len(confidences), 3) if confidences else 0.0,
                 "discarded_segments": discarded,
                 "audio_preview": os.path.basename(preview_path) if preview_path and os.path.exists(preview_path) else None,
+                "waveform": waveform,
                 "media_info": info,
+                "diarization": diarization,
+                "analysis": conteudo,
+                "legendas_qa": ptbr.subtitle_report(cues),
+                "vocabulary": terms,
+                # Quantas vezes mais rápido que o tempo real: a métrica que
+                # responde "vale a pena usar o perfil de precisão nesta máquina?"
+                "processing_seconds": round(elapsed, 1),
+                "speed_factor": round(total_duration / elapsed, 2) if total_duration else 0.0,
             }
 
         finally:

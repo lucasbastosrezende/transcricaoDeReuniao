@@ -6,3 +6,8 @@ fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
 jinja2>=3.1.2
 python-multipart>=0.0.9
+
+# Cálculo numérico: MFCC da separação de falantes e forma de onda do player.
+# Já vem junto do faster-whisper, mas é dependência direta nossa — declarar
+# evita que uma mudança lá em cima quebre a diarização sem aviso.
+numpy>=1.24
