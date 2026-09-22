@@ -1,16 +1,23 @@
 /* ============================================================
    Transcritor pt-BR — lógica da interface
 
-   Três telas (envio, progresso, resultado) mais duas gavetas
-   (histórico e busca global). O estado do lote em andamento vive
-   em `estado.lote`; o servidor processa um arquivo por vez, então
-   a interface acompanha o atual por SSE e o resto por sondagem.
+   Três telas (envio, progresso, resultado) e três sobreposições
+   (histórico, busca global e atalhos) que flutuam sobre a tela
+   atual. O estado do lote em andamento vive em `estado.lote`; o
+   servidor processa um arquivo por vez, então a interface
+   acompanha o atual por SSE e o resto por sondagem.
    ============================================================ */
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
   const CORES_FALANTE = 8;
+  const ESTADOS = {
+    concluido: "concluído", erro: "erro", cancelado: "cancelado",
+    processando: "em andamento", na_fila: "na fila",
+  };
+  const VELOCIDADES = [0.75, 1, 1.25, 1.5, 2];
+  const LIMITE_BAIXA = 0.55;
 
   const estado = {
     arquivos: [],
@@ -20,6 +27,8 @@
     resultado: null,
     formatos: [],
     sistema: null,
+    perfil: null,
+    velocidade: 1,
     trechoAtivo: -1,
     envio: null,
     fonteEventos: null,
@@ -27,6 +36,9 @@
     edicoes: new Map(),
     falantesOcultos: new Set(),
     onda: [],
+    opcoes: { falantes: true, analise: true },
+    etapaAtual: 0,
+    etapaDesenhada: -1,
   };
 
   // ---------- utilidades ----------
@@ -61,6 +73,8 @@
 
   const numero = (n) => (n || 0).toLocaleString("pt-BR");
 
+  const velocidadeTexto = (v) => `${String(v).replace(".", ",")}×`;
+
   let temporizadorAviso;
   function avisar(mensagem) {
     const el = $("aviso");
@@ -70,22 +84,49 @@
     temporizadorAviso = setTimeout(() => el.classList.add("oculto"), 3600);
   }
 
-  const TELAS = ["telaEnvio", "telaProgresso", "telaResultado", "telaHistorico", "telaBusca"];
+  // ---------- telas e sobreposições ----------
+  const TELAS = ["telaEnvio", "telaProgresso", "telaResultado"];
+  const SOBREPOSICOES = ["telaHistorico", "telaBusca", "modalAtalhos"];
+
   function mostrarTela(id) {
     TELAS.forEach((t) => $(t).classList.toggle("oculto", t !== id));
+    if (id === "telaResultado") posicionarIndicadorAbas();
   }
 
-  // ---------- tema ----------
-  const temaSalvo = localStorage.getItem("transcritor-tema");
-  if (temaSalvo) document.documentElement.dataset.tema = temaSalvo;
-  $("btnTema").textContent = document.documentElement.dataset.tema === "claro" ? "☀️" : "🌙";
-  $("btnTema").addEventListener("click", () => {
-    const novo = document.documentElement.dataset.tema === "claro" ? "escuro" : "claro";
-    document.documentElement.dataset.tema = novo;
-    localStorage.setItem("transcritor-tema", novo);
-    $("btnTema").textContent = novo === "claro" ? "☀️" : "🌙";
-    desenharOnda();
+  function abrirSobreposicao(id) {
+    SOBREPOSICOES.forEach((s) => $(s).classList.toggle("oculto", s !== id));
+    document.body.classList.add("travado");
+  }
+
+  function fecharSobreposicoes() {
+    SOBREPOSICOES.forEach((s) => $(s).classList.add("oculto"));
+    document.body.classList.remove("travado");
+  }
+
+  const alguemAberto = () => SOBREPOSICOES.some((s) => !$(s).classList.contains("oculto"));
+
+  document.querySelectorAll("[data-fechar]").forEach((el) =>
+    el.addEventListener("click", fecharSobreposicoes)
+  );
+
+  $("btnInicio").addEventListener("click", () => {
+    fecharSobreposicoes();
+    mostrarTela(estado.fonteEventos || estado.envio ? "telaProgresso" : "telaEnvio");
   });
+
+  // ---------- barras animadas da área de arrastar ----------
+  (function montarOndasArea() {
+    const alvo = $("areaOndas");
+    const fragmento = document.createDocumentFragment();
+    for (let i = 0; i < 14; i++) {
+      const barra = document.createElement("span");
+      barra.style.setProperty("--d", `${(1 + Math.abs(Math.sin(i * 1.7)) * 0.9).toFixed(2)}s`);
+      barra.style.setProperty("--atraso", `${(i * 0.08).toFixed(2)}s`);
+      barra.style.setProperty("--o", (0.3 + Math.abs(Math.cos(i * 0.6)) * 0.55).toFixed(2));
+      fragmento.appendChild(barra);
+    }
+    alvo.appendChild(fragmento);
+  })();
 
   // ---------- informações do sistema ----------
   async function carregarSistema() {
@@ -95,8 +136,8 @@
 
       const hw = dados.hardware;
       $("topoHardware").textContent = hw.gpu
-        ? `Placa de vídeo detectada · ${hw.compute_type} · processamento acelerado`
-        : `${hw.cpu_threads} núcleos de CPU · ${hw.compute_type} · 100% offline e gratuito`;
+        ? `pt-BR · placa de vídeo · ${hw.compute_type} · offline`
+        : `pt-BR · ${hw.cpu_threads} núcleos · ${hw.compute_type} · offline`;
 
       $("avisoFfmpeg").classList.toggle("oculto", dados.ffmpeg);
 
@@ -105,24 +146,18 @@
         .map((m) => {
           const marca = m.baixado ? "" : " — download na 1ª vez";
           const rec = m.padrao ? " (recomendado)" : "";
-          return `<option value="${m.id}"${m.padrao ? " selected" : ""}>${m.nome}${rec}${marca}</option>`;
+          return `<option value="${m.id}"${m.padrao ? " selected" : ""}>${escapar(m.nome)}${rec}${marca}</option>`;
         })
         .join("");
 
-      const selPerfil = $("selPerfil");
-      selPerfil.innerHTML = dados.perfis
-        .map((p) => `<option value="${p.id}"${p.padrao ? " selected" : ""}>${p.nome}</option>`)
-        .join("");
+      montarPerfis(dados.perfis);
 
-      const atualizarDicas = () => {
+      const atualizarDicaModelo = () => {
         const m = dados.modelos.find((x) => x.id === selModelo.value);
-        const p = dados.perfis.find((x) => x.id === selPerfil.value);
         $("dicaModelo").textContent = m ? `${m.resumo} · ${m.params} · ~${m.ram_gb} GB de RAM` : "";
-        $("dicaPerfil").textContent = p ? p.resumo : "";
       };
-      selModelo.addEventListener("change", atualizarDicas);
-      selPerfil.addEventListener("change", atualizarDicas);
-      atualizarDicas();
+      selModelo.addEventListener("change", atualizarDicaModelo);
+      atualizarDicaModelo();
 
       const recursos = dados.recursos || {};
       $("optFalantes").checked = recursos.diarizacao !== false;
@@ -131,8 +166,47 @@
 
       $("entradaArquivo").accept = dados.extensoes.join(",");
     } catch (e) {
-      $("topoHardware").textContent = "Não foi possível ler as informações do sistema.";
+      $("topoHardware").textContent = "sistema indisponível";
     }
+  }
+
+  // O perfil vira um controle segmentado: são sempre poucas opções e
+  // a escolha muda o tempo de processamento, então ela fica à vista.
+  function montarPerfis(perfis) {
+    const caixa = $("segPerfil");
+    const indicador = $("segPerfilIndicador");
+    caixa.querySelectorAll(".segmento").forEach((b) => b.remove());
+    caixa.style.gridTemplateColumns = `repeat(${perfis.length}, 1fr)`;
+    indicador.style.width = `calc((100% - 6px) / ${perfis.length})`;
+
+    perfis.forEach((p) => {
+      const botao = document.createElement("button");
+      botao.type = "button";
+      botao.className = "segmento";
+      botao.dataset.perfil = p.id;
+      botao.textContent = p.nome;
+      botao.setAttribute("role", "radio");
+      botao.addEventListener("click", () => escolherPerfil(p.id));
+      caixa.appendChild(botao);
+    });
+
+    const padrao = (perfis.find((p) => p.padrao) || perfis[0] || {}).id;
+    if (padrao) escolherPerfil(padrao);
+  }
+
+  function escolherPerfil(id) {
+    const perfis = (estado.sistema && estado.sistema.perfis) || [];
+    const indice = Math.max(0, perfis.findIndex((p) => p.id === id));
+    estado.perfil = id;
+    $("segPerfilIndicador").style.left =
+      `calc(3px + ${indice} * (100% - 6px) / ${perfis.length || 1})`;
+    $("segPerfil").querySelectorAll(".segmento").forEach((b) => {
+      const ativo = b.dataset.perfil === id;
+      b.classList.toggle("ativo", ativo);
+      b.setAttribute("aria-checked", ativo ? "true" : "false");
+    });
+    const perfil = perfis[indice];
+    $("dicaPerfil").textContent = perfil ? perfil.resumo : "";
   }
 
   // ---------- seleção de arquivos ----------
@@ -188,11 +262,12 @@
       const ext = (arquivo.name.split(".").pop() || "").toUpperCase();
       const item = document.createElement("div");
       item.className = "arquivo";
+      item.style.animationDelay = `${(indice * 0.06).toFixed(2)}s`;
       item.innerHTML =
         `<span class="arquivo-selo">${escapar(ext.slice(0, 4))}</span>` +
-        `<div class="arquivo-dados"><strong>${escapar(arquivo.name)}</strong>` +
-        `<span class="tenue">${formatarBytes(arquivo.size)}</span></div>` +
-        `<button type="button" class="btn-icone" title="Remover">✕</button>`;
+        `<span class="arquivo-nome">${escapar(arquivo.name)}</span>` +
+        `<span class="arquivo-meta">${formatarBytes(arquivo.size)}</span>` +
+        `<button type="button" class="arquivo-remover">Remover</button>`;
       item.querySelector("button").addEventListener("click", () => {
         estado.arquivos.splice(indice, 1);
         desenharArquivos();
@@ -202,17 +277,17 @@
 
     if (estado.arquivos.length > 1) {
       const total = estado.arquivos.reduce((soma, a) => soma + a.size, 0);
-      const rodape = document.createElement("p");
-      rodape.className = "tenue";
+      const rodape = document.createElement("span");
+      rodape.className = "arquivos-resumo";
       rodape.textContent = `${estado.arquivos.length} arquivos · ${formatarBytes(total)} no total. Serão processados em sequência.`;
       lista.appendChild(rodape);
     }
 
-    $("btnIniciar").disabled = !estado.arquivos.length;
-    $("btnIniciar").textContent =
-      estado.arquivos.length > 1
-        ? `Transcrever ${estado.arquivos.length} arquivos`
-        : "Iniciar transcrição";
+    const quantos = estado.arquivos.length;
+    $("btnIniciar").disabled = !quantos;
+    $("btnIniciarRotulo").textContent =
+      quantos > 1 ? `Transcrever ${quantos} arquivos` : "Iniciar transcrição";
+    $("btnIniciarDica").textContent = quantos ? "tudo roda nesta máquina" : "escolha um arquivo";
   }
 
   // ---------- envio ----------
@@ -220,14 +295,19 @@
     e.preventDefault();
     if (!estado.arquivos.length) return;
 
+    estado.opcoes = {
+      falantes: $("optFalantes").checked,
+      analise: $("optAnalise").checked,
+    };
+
     const dados = new FormData();
     estado.arquivos.forEach((arquivo) => dados.append("files", arquivo));
     dados.append("model_name", $("selModelo").value);
-    dados.append("profile", $("selPerfil").value);
+    dados.append("profile", estado.perfil || "");
     dados.append("language", $("selIdioma").value);
     dados.append("vocabulary", $("campoVocabulario").value);
-    dados.append("diarizar", $("optFalantes").checked);
-    dados.append("analisar", $("optAnalise").checked);
+    dados.append("diarizar", estado.opcoes.falantes);
+    dados.append("analisar", estado.opcoes.analise);
     dados.append("remover_vicios", $("optVicios").checked);
 
     mostrarTela("telaProgresso");
@@ -282,21 +362,74 @@
     mostrarTela("telaEnvio");
   }
 
+  // ---------- progresso ----------
+  const FEED_VAZIO = '<span class="feed-vazio">Ouvindo…</span>';
+
   function reiniciarProgresso() {
-    $("feedCorpo").innerHTML = '<p class="tenue">Os trechos aparecem aqui conforme são reconhecidos.</p>';
+    $("feedCorpo").innerHTML = FEED_VAZIO;
     $("feedContagem").textContent = "0 trechos";
     $("progEta").textContent = "";
-    $("progArquivo").textContent = "";
+    $("progArquivo").textContent = "Preparando o envio";
+    $("progEyebrow").textContent = "Transcrevendo";
     $("filaLote").classList.add("oculto");
-    definirProgresso(0, "Preparando...", "Enviando os arquivos para o servidor.");
+    estado.etapaAtual = 0;
+    estado.etapaDesenhada = -1;
+    definirProgresso(0, "Preparando", "Enviando os arquivos para o servidor.");
+  }
+
+  // As etapas visíveis dependem do que foi pedido: sem diarização não
+  // faz sentido mostrar "Separando falantes" parado o tempo todo.
+  function etapasDoLote() {
+    const etapas = [
+      {
+        rotulo: "Preparando o áudio",
+        chaves: ["Preparando", "Enviando", "Na fila", "Iniciando", "Analisando o arquivo",
+                 "Extraindo o áudio", "Carregando o modelo", "Baixando o modelo"],
+      },
+      { rotulo: "Reconhecendo a fala", chaves: ["Transcrevendo", "Revisando o texto"] },
+    ];
+    if (estado.opcoes.falantes) {
+      etapas.push({ rotulo: "Separando falantes", chaves: ["Separando os falantes"] });
+    }
+    etapas.push({
+      rotulo: estado.opcoes.analise ? "Resumo e capítulos" : "Fechando os arquivos",
+      chaves: ["Montando o documento", "Lendo o conteúdo", "Finalizando", "Concluído"],
+    });
+    return etapas;
+  }
+
+  function desenharEtapas(etapa, detalhe) {
+    const etapas = etapasDoLote();
+    if (etapa) {
+      const achou = etapas.findIndex((e) => e.chaves.some((c) => etapa.startsWith(c)));
+      if (achou !== -1) estado.etapaAtual = achou;
+    }
+    const atual = Math.min(estado.etapaAtual, etapas.length - 1);
+    const lista = $("progEtapas");
+
+    if (lista.children.length === etapas.length && estado.etapaDesenhada === atual) {
+      const nota = lista.children[atual].querySelector("em");
+      if (nota) nota.textContent = detalhe || "";
+      return;
+    }
+    estado.etapaDesenhada = atual;
+
+    lista.innerHTML = etapas
+      .map((e, i) => {
+        const classe = i < atual ? "feita" : i === atual ? "atual" : "";
+        const nota = i < atual ? "feito" : i === atual ? detalhe || "" : "";
+        return (
+          `<li class="prog-etapa ${classe}"><span></span>` +
+          `<span>${escapar(e.rotulo)}</span><em>${escapar(nota)}</em></li>`
+        );
+      })
+      .join("");
   }
 
   function definirProgresso(pct, etapa, detalhe) {
     $("progBarra").style.width = `${pct}%`;
-    $("progAnel").style.setProperty("--pct", pct);
-    $("progNumero").textContent = `${Math.round(pct)}%`;
-    if (etapa) $("progEtapa").textContent = etapa;
-    if (detalhe !== undefined) $("progDetalhe").textContent = detalhe;
+    $("progNumero").textContent = String(Math.floor(pct));
+    desenharEtapas(etapa, detalhe);
   }
 
   // ---------- fila do lote ----------
@@ -310,19 +443,19 @@
     $("filaItens").innerHTML = estado.lote
       .map((t, i) => {
         const classe =
-          t.status === "concluido" ? "selo-ok"
-            : t.status === "erro" ? "selo-erro"
-            : i === estado.indiceAtual ? "selo-ativo" : "selo-neutro";
+          t.status === "concluido" ? "ok"
+            : t.status === "erro" ? "erro"
+            : i === estado.indiceAtual ? "ativo" : "";
         const rotulo =
           t.status === "concluido" ? "pronto"
             : t.status === "erro" ? "erro"
             : i === estado.indiceAtual ? `${Math.round(t.percent || 0)}%` : "na fila";
         const abrir = t.status === "concluido"
-          ? `<button type="button" class="btn btn-suave btn-pequeno" data-abrir-lote="${t.job_id}">Abrir</button>`
+          ? `<button type="button" class="btn btn-contorno btn-pequeno" data-abrir-lote="${t.job_id}">Abrir</button>`
           : "";
         return (
           `<div class="fila-item"><span class="fila-nome">${escapar(t.filename)}</span>` +
-          `<span class="selo ${classe}">${rotulo}</span>${abrir}</div>`
+          `<span class="fila-direita"><span class="fila-estado ${classe}">${rotulo}</span>${abrir}</span></div>`
         );
       })
       .join("");
@@ -363,13 +496,16 @@
     const tarefa = estado.lote[estado.indiceAtual];
     if (!tarefa) return;
     estado.jobId = tarefa.job_id;
-    $("progArquivo").textContent =
+    estado.etapaAtual = 0;
+    estado.etapaDesenhada = -1;
+    $("progEyebrow").textContent =
       estado.lote.length > 1
-        ? `${estado.indiceAtual + 1}/${estado.lote.length} · ${tarefa.filename}`
-        : tarefa.filename;
-    $("feedCorpo").innerHTML = '<p class="tenue">Os trechos aparecem aqui conforme são reconhecidos.</p>';
+        ? `Transcrevendo · ${estado.indiceAtual + 1} de ${estado.lote.length}`
+        : "Transcrevendo";
+    $("progArquivo").textContent = tarefa.filename;
+    $("feedCorpo").innerHTML = FEED_VAZIO;
     $("feedContagem").textContent = "0 trechos";
-    definirProgresso(15, "Na fila", "Aguardando o processador...");
+    definirProgresso(15, "Na fila", "Aguardando o processador…");
     acompanhar(tarefa.job_id);
   }
 
@@ -396,11 +532,13 @@
         // 15% da barra pertencem ao upload; o resto ao processamento.
         const pct = 15 + dados.percent * 0.85;
         const detalhe = dados.queue_position > 1
-          ? `${dados.queue_position - 1} tarefa(s) na frente desta.`
+          ? `${dados.queue_position - 1} na frente`
           : dados.detail;
         definirProgresso(pct, dados.stage, detalhe);
         $("progEta").textContent =
-          dados.eta_seconds > 0 ? `Tempo restante estimado: ${formatarTempo(dados.eta_seconds)}` : "";
+          dados.eta_seconds > 0
+            ? `Tempo restante estimado · ${formatarTempo(dados.eta_seconds)}`
+            : "";
         const tarefa = estado.lote[estado.indiceAtual];
         if (tarefa) {
           tarefa.percent = dados.percent;
@@ -418,7 +556,8 @@
         dados.segments.forEach((s) => {
           const linha = document.createElement("div");
           linha.className = "feed-linha";
-          linha.innerHTML = `<span class="mono">${s.start_str}</span><span>${escapar(s.text)}</span>`;
+          linha.innerHTML =
+            `<span class="mono">${escapar(s.start_str)}</span><p>${escapar(s.text)}</p>`;
           corpo.appendChild(linha);
         });
         corpo.scrollTop = corpo.scrollHeight;
@@ -489,6 +628,7 @@
       const dados = await (await fetch(`/api/progress/${jobId}`)).json();
       estado.jobId = dados.job_id;
       estado.formatos = dados.formats || [];
+      fecharSobreposicoes();
       mostrarResultado(dados.result, dados);
     } catch (e) {
       avisar("Não foi possível abrir esta transcrição.");
@@ -507,12 +647,17 @@
     estado.onda = resultado.waveform || [];
     mostrarTela("telaResultado");
 
-    $("resTitulo").textContent = meta.filename ? `Transcrição · ${meta.filename}` : "Transcrição concluída";
     const fator = meta.speed_factor || resultado.speed_factor;
-    $("resArquivo").textContent =
-      `${resultado.model} · perfil ${resultado.profile} · idioma ${resultado.language}` +
-      (fator ? ` · ${fator}× mais rápido que o tempo real` : "") +
-      (resultado.discarded_segments ? ` · ${resultado.discarded_segments} trecho(s) descartado(s) por alucinação` : "");
+    $("resEyebrow").textContent = fator
+      ? `Concluída · ${fator}× mais rápido que o tempo real`
+      : "Concluída";
+    $("resTitulo").textContent = meta.filename || "Transcrição concluída";
+    $("resMeta").textContent =
+      `${resultado.model} · perfil ${resultado.profile} · ${resultado.language} ` +
+      `${Math.round((resultado.language_probability || 1) * 100)}%` +
+      (resultado.discarded_segments
+        ? ` · ${resultado.discarded_segments} trecho(s) descartado(s) por alucinação`
+        : "");
 
     desenharMetricas(resultado, meta);
     desenharTexto(resultado);
@@ -536,26 +681,49 @@
       ["Duração", formatarDuracao(resultado.duration)],
       ["Palavras", numero(resultado.word_count)],
       ["Trechos", numero(resultado.segments.length)],
-      ["Confiança", `${confianca}%`],
+      ["Confiança média", `${confianca}%`],
       ["Processamento", meta.elapsed ? formatarTempo(meta.elapsed) : formatarTempo(resultado.processing_seconds)],
     ];
-    if (falantes) linhas.push(["Falantes", falantes]);
+    if (falantes) linhas.splice(2, 0, ["Falantes", falantes]);
     $("resMetricas").innerHTML = linhas
       .map(
-        ([nome, valor]) =>
-          `<div class="metrica"><div class="metrica-valor">${valor}</div><div class="metrica-nome">${nome}</div></div>`
+        ([nome, valor], i) =>
+          `<div class="metrica" style="animation-delay:${(0.05 + i * 0.05).toFixed(2)}s">` +
+          `<span class="metrica-valor">${escapar(String(valor))}</span>` +
+          `<span class="metrica-nome">${nome}</span></div>`
       )
       .join("");
   }
 
   function desenharTexto(resultado) {
-    const blocos = resultado.dialogue && resultado.dialogue.length
-      ? resultado.dialogue.map(
-          (b) =>
-            `<p><span class="quem s${(b.speaker_id || 0) % CORES_FALANTE}">${escapar(b.speaker || "")}</span> ${escapar(b.texto)}</p>`
+    const alvo = $("textoCompleto");
+    const blocos = resultado.dialogue && resultado.dialogue.length ? resultado.dialogue : null;
+
+    if (blocos) {
+      alvo.innerHTML = blocos
+        .map(
+          (b, i) =>
+            `<div class="texto-bloco" data-inicio="${b.start}" data-bloco="${i}" ` +
+            `style="animation-delay:${(Math.min(i, 8) * 0.04).toFixed(2)}s">` +
+            `<button type="button" class="texto-quem" data-ir="${b.start}">` +
+            `<strong class="quem s${(b.speaker_id || 0) % CORES_FALANTE}">${escapar(b.speaker || "")}</strong>` +
+            `<span class="mono">${escapar(b.start_str || "")}</span></button>` +
+            `<p>${escapar(b.texto)}</p></div>`
         )
-      : (resultado.paragraphs || [resultado.plain_text]).map((p) => `<p>${escapar(p)}</p>`);
-    $("textoCompleto").innerHTML = blocos.join("");
+        .join("");
+      alvo.querySelectorAll("[data-ir]").forEach((botao) =>
+        botao.addEventListener("click", () => irPara(parseFloat(botao.dataset.ir)))
+      );
+    } else {
+      const paragrafos = resultado.paragraphs || [resultado.plain_text];
+      alvo.innerHTML = paragrafos
+        .map(
+          (p, i) =>
+            `<div class="texto-bloco sozinho" style="animation-delay:${(Math.min(i, 8) * 0.04).toFixed(2)}s">` +
+            `<p>${escapar(p)}</p></div>`
+        )
+        .join("");
+    }
   }
 
   function desenharFiltros(resultado) {
@@ -565,7 +733,8 @@
       .map(
         (f) =>
           `<button type="button" class="chip s${f.id % CORES_FALANTE} ativo" data-falante="${escapar(f.nome)}">` +
-          `${escapar(f.nome)} <span class="tenue">${f.percentual}%</span></button>`
+          `<span class="chip-ponto"></span>${escapar(f.nome)}` +
+          `<span class="mono">${f.percentual}%</span></button>`
       )
       .join("");
     $("chipsFalantes").querySelectorAll("[data-falante]").forEach((chip) =>
@@ -583,30 +752,33 @@
     const lista = $("listaTrechos");
     const alvo = filtro.trim().toLowerCase();
     const soBaixa = $("optSoBaixa").checked;
-    const limite = 0.55;
     lista.innerHTML = "";
     let achados = 0;
 
     estado.resultado.segments.forEach((s, indice) => {
       if (alvo && !s.text.toLowerCase().includes(alvo)) return;
-      if (soBaixa && s.confidence >= limite) return;
+      if (soBaixa && s.confidence >= LIMITE_BAIXA) return;
       if (s.speaker && estado.falantesOcultos.has(s.speaker)) return;
       achados++;
 
+      const baixa = s.confidence < LIMITE_BAIXA;
       const item = document.createElement("div");
-      item.className = "trecho" + (s.confidence < limite ? " trecho-baixa" : "");
+      item.className = "trecho" + (baixa ? " baixa" : "");
       item.dataset.indice = indice;
       const quem = s.speaker
-        ? `<div class="quem s${(s.speaker_id || 0) % CORES_FALANTE}">${escapar(s.speaker)}</div>`
+        ? `<span class="quem s${(s.speaker_id || 0) % CORES_FALANTE}">${escapar(s.speaker)}</span>`
         : "";
       const texto = alvo ? realcar(s.text, alvo) : escapar(s.text);
       item.innerHTML =
-        `<div class="trecho-tempo" title="Confiança ${Math.round(s.confidence * 100)}% — clique para ouvir">` +
-        `${s.start_str}${quem}</div>` +
+        `<span class="trecho-marca"></span>` +
+        `<button type="button" class="trecho-tempo" title="Ouvir a partir daqui">` +
+        `<span class="mono">${s.start_str}</span>${quem}</button>` +
         `<div class="trecho-corpo">` +
         `<div class="trecho-texto" contenteditable="true" spellcheck="true" data-id="${s.id}">${texto}</div>` +
-        (s.confidence < limite ? '<div class="trecho-aviso">⚠ baixa confiança — vale conferir no áudio</div>' : "") +
-        "</div>";
+        (baixa
+          ? `<span class="trecho-aviso">Baixa confiança (${Math.round(s.confidence * 100)}%) — vale conferir no áudio</span>`
+          : "") +
+        `</div>`;
 
       item.querySelector(".trecho-tempo").addEventListener("click", () => irPara(s.start));
       const campo = item.querySelector(".trecho-texto");
@@ -625,7 +797,7 @@
       lista.appendChild(item);
     });
 
-    if (!achados) lista.innerHTML = '<p class="tenue">Nenhum trecho encontrado com estes filtros.</p>';
+    if (!achados) lista.innerHTML = '<p class="vazio">Nenhum trecho encontrado com estes filtros.</p>';
     return achados;
   }
 
@@ -642,7 +814,7 @@
     if (!estado.edicoes.size || !estado.jobId) return;
     const botao = $("btnSalvarEdicao");
     botao.disabled = true;
-    botao.textContent = "Salvando...";
+    botao.textContent = "Salvando…";
     try {
       const corpo = {
         segments: Array.from(estado.edicoes, ([id, text]) => ({ id, text })),
@@ -660,6 +832,7 @@
         avisar(`${dados.trechos_alterados} trecho(s) salvos. Arquivos regerados.`);
         estado.edicoes.clear();
         await abrirTarefa(estado.jobId);
+        trocarAba("abaTrechos");
       }
     } catch (erro) {
       avisar(erro.message || "Não foi possível salvar as correções.");
@@ -671,110 +844,126 @@
 
   function desenharLegendas(resultado) {
     const qa = resultado.legendas_qa || {};
+    const rapidas = new Set(qa.acima_do_cps || []);
     $("qaLegendas").innerHTML = qa.blocos
-      ? `<span>${qa.blocos} blocos</span><span>${qa.cps_medio} caracteres por segundo em média</span>` +
-        (qa.acima_do_cps && qa.acima_do_cps.length
-          ? `<span class="alerta-inline">${qa.acima_do_cps.length} bloco(s) rápidos demais para ler</span>`
-          : "<span class=\"ok-inline\">ritmo de leitura dentro do recomendado</span>")
+      ? `<span>${qa.blocos} blocos</span>` +
+        `<span>${qa.cps_medio} caracteres por segundo em média</span>` +
+        (rapidas.size
+          ? `<span class="atencao">${rapidas.size} bloco(s) rápidos demais para ler</span>`
+          : `<span class="ok">Ritmo de leitura dentro do recomendado</span>`) +
+        `<span>Máx. 2 linhas × 42 colunas</span>`
       : "";
 
     const lista = $("listaLegendas");
     lista.innerHTML = "";
-    const rapidas = new Set(qa.acima_do_cps || []);
     (resultado.cues || []).forEach((c) => {
-      const item = document.createElement("div");
-      item.className = "trecho" + (rapidas.has(c.id) ? " trecho-baixa" : "");
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "legenda" + (rapidas.has(c.id) ? " rapida" : "");
       item.innerHTML =
-        `<div class="trecho-tempo">${c.id}<br>${formatarTempo(c.start)}<br><span class="tenue">${c.cps || 0} cps</span></div>` +
-        `<div class="trecho-linhas">${c.lines.map((l) => `<div class="trecho-texto">${escapar(l)}</div>`).join("")}</div>`;
+        `<span class="legenda-topo"><span>${c.id}</span>` +
+        `<span>${formatarTempo(c.start)} → ${formatarTempo(c.end)}</span>` +
+        `<span>${c.cps || 0} cps</span></span>` +
+        `<span class="legenda-tela">` +
+        c.lines.map((l) => `<span>${escapar(l)}</span>`).join("") +
+        `</span>`;
       item.addEventListener("click", () => irPara(c.start));
       lista.appendChild(item);
     });
-    if (!lista.children.length) lista.innerHTML = '<p class="tenue">Sem blocos de legenda.</p>';
+    if (!lista.children.length) lista.innerHTML = '<p class="vazio">Sem blocos de legenda.</p>';
   }
 
   function desenharResumo(resultado) {
     const analise = resultado.analysis || {};
     const alvo = $("conteudoResumo");
     if (!analise.resumo && !analise.capitulos) {
-      alvo.innerHTML = '<p class="tenue">A análise de conteúdo estava desligada nesta transcrição.</p>';
+      alvo.innerHTML = '<p class="vazio">A análise de conteúdo estava desligada nesta transcrição.</p>';
       return;
     }
 
-    const secoes = [];
+    const esquerda = [];
+    const direita = [];
 
     if (analise.resumo && analise.resumo.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Em poucas linhas</h3><ul class="lista-tempo">` +
+      esquerda.push(
+        `<section class="secao secao-solta"><span class="sobrancelha">Em poucas linhas</span>` +
           analise.resumo
             .map(
-              (i) =>
-                `<li><button type="button" class="ir" data-ir="${i.start}">${i.start_str}</button> ${escapar(i.texto)}</li>`
+              (i, n) =>
+                `<div class="item-tempo resumo-linha" style="animation-delay:${(0.05 + n * 0.05).toFixed(2)}s">` +
+                `<button type="button" class="ir" data-ir="${i.start}">${i.start_str}</button>` +
+                `<p>${escapar(i.texto)}</p></div>`
             )
             .join("") +
-          `</ul></div>`
-      );
-    }
-
-    if (analise.palavras_chave && analise.palavras_chave.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Temas dominantes</h3><div class="chips">` +
-          analise.palavras_chave
-            .map(
-              (k) =>
-                `<span class="chip" style="--peso:${k.peso}">${escapar(k.termo)} <span class="tenue">${k.ocorrencias}×</span></span>`
-            )
-            .join("") +
-          `</div></div>`
+          `</section>`
       );
     }
 
     if (analise.capitulos && analise.capitulos.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Capítulos</h3><ul class="lista-tempo">` +
+      esquerda.push(
+        `<section class="secao"><span class="sobrancelha secao-titulo">Capítulos</span>` +
           analise.capitulos
             .map(
               (c) =>
-                `<li><button type="button" class="ir" data-ir="${c.start}">${c.start_str}</button> ` +
-                `<strong>${escapar(c.titulo)}</strong><br><span class="tenue">${escapar(c.abertura)}…</span></li>`
+                `<button type="button" class="capitulo" data-ir="${c.start}">` +
+                `<span class="mono">${c.start_str}</span>` +
+                `<span class="capitulo-texto"><strong>${escapar(c.titulo)}</strong>` +
+                `<span>${escapar(c.abertura)}…</span></span></button>`
             )
             .join("") +
-          `</ul></div>`
+          `</section>`
+      );
+    }
+
+    if (analise.palavras_chave && analise.palavras_chave.length) {
+      direita.push(
+        `<section class="secao secao-temas"><span class="sobrancelha">Temas dominantes</span>` +
+          `<div class="temas">` +
+          analise.palavras_chave
+            .map(
+              (k) =>
+                `<span class="tema">${escapar(k.termo)}` +
+                `<span class="mono">${k.ocorrencias}×</span></span>`
+            )
+            .join("") +
+          `</div></section>`
       );
     }
 
     if (analise.pendencias && analise.pendencias.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Possíveis pendências</h3>` +
-          `<p class="tenue">Frases que soam como compromisso assumido. Confira no áudio antes de cobrar alguém.</p>` +
-          `<ul class="lista-tempo">` +
+      direita.push(
+        `<section class="secao"><span class="sobrancelha">Possíveis pendências</span>` +
+          `<span class="secao-nota">Frases que soam como compromisso assumido. Confira no áudio antes de cobrar alguém.</span>` +
           analise.pendencias
             .map(
               (p) =>
-                `<li><button type="button" class="ir" data-ir="${p.start}">${p.start_str}</button> ` +
-                (p.falante ? `<strong>${escapar(p.falante)}:</strong> ` : "") +
-                escapar(p.texto) +
-                `</li>`
+                `<div class="item-tempo linha-tempo">` +
+                `<button type="button" class="ir" data-ir="${p.start}">${p.start_str}</button>` +
+                `<p>${p.falante ? `<strong class="quem${classeFalante(p.falante)}">${escapar(p.falante)}</strong> ` : ""}${escapar(p.texto)}</p></div>`
             )
             .join("") +
-          `</ul></div>`
+          `</section>`
       );
     }
 
     if (analise.perguntas && analise.perguntas.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Perguntas feitas</h3><ul class="lista-tempo">` +
+      direita.push(
+        `<section class="secao"><span class="sobrancelha secao-titulo">Perguntas feitas</span>` +
           analise.perguntas
             .map(
               (p) =>
-                `<li><button type="button" class="ir" data-ir="${p.start}">${p.start_str}</button> ${escapar(p.texto)}</li>`
+                `<div class="item-tempo linha-tempo">` +
+                `<button type="button" class="ir" data-ir="${p.start}">${p.start_str}</button>` +
+                `<p>${escapar(p.texto)}</p></div>`
             )
             .join("") +
-          `</ul></div>`
+          `</section>`
       );
     }
 
-    alvo.innerHTML = secoes.join("");
+    alvo.innerHTML =
+      `<div class="duas-colunas"><div class="coluna">${esquerda.join("")}</div>` +
+      `<div class="coluna">${direita.join("")}</div></div>`;
     alvo.querySelectorAll("[data-ir]").forEach((botao) =>
       botao.addEventListener("click", () => irPara(parseFloat(botao.dataset.ir)))
     );
@@ -784,7 +973,31 @@
     const analise = resultado.analysis || {};
     const stats = analise.estatisticas || {};
     const info = resultado.media_info || {};
-    const secoes = [];
+    const falantes = (resultado.diarization || {}).falantes || [];
+    const esquerda = [];
+
+    if (analise.por_falante && analise.por_falante.length) {
+      const maior = Math.max(...analise.por_falante.map((f) => f.tempo_s || 0)) || 1;
+      esquerda.push(
+        `<section class="secao"><span class="sobrancelha secao-titulo">Participação por falante</span>` +
+          analise.por_falante
+            .map((f, i) => {
+              const ficha = falantes.find((x) => x.nome === f.nome);
+              const classe = `s${((ficha && ficha.id) || i) % CORES_FALANTE}`;
+              const largura = Math.max(2, Math.round((f.tempo_s / maior) * 100));
+              return (
+                `<div class="falante-bloco"><div class="falante-topo">` +
+                `<strong class="quem ${classe}">${escapar(f.nome)}</strong>` +
+                `<span class="mono">${formatarTempo(f.tempo_s)} · ${numero(f.palavras)} palavras · ${f.palavras_por_minuto} ppm</span>` +
+                `</div><div class="falante-barra"><div class="${classe}" ` +
+                `style="width:${largura}%;background:currentColor;animation-delay:${(i * 0.08).toFixed(2)}s"></div></div>` +
+                `<span class="falante-termos">${escapar(f.termos.join(", "))}</span></div>`
+              );
+            })
+            .join("") +
+          `</section>`
+      );
+    }
 
     const linhas = [
       ["Palavras por minuto", stats.palavras_por_minuto || "—"],
@@ -798,28 +1011,6 @@
       ["Trechos de baixa confiança", numero(stats.trechos_baixa_confianca)],
       ["Idioma detectado", `${resultado.language} (${Math.round((resultado.language_probability || 1) * 100)}%)`],
     ];
-    secoes.push(
-      `<div class="bloco"><h3>A gravação em números</h3><table class="tabela">` +
-        linhas.map(([n, v]) => `<tr><td>${n}</td><td class="mono">${v}</td></tr>`).join("") +
-        `</table></div>`
-    );
-
-    if (analise.por_falante && analise.por_falante.length) {
-      secoes.push(
-        `<div class="bloco"><h3>Participação por falante</h3><table class="tabela">` +
-          `<tr><th>Falante</th><th>Tempo</th><th>Palavras</th><th>Ritmo</th><th>Termos</th></tr>` +
-          analise.por_falante
-            .map(
-              (f) =>
-                `<tr><td>${escapar(f.nome)}</td><td class="mono">${formatarTempo(f.tempo_s)}</td>` +
-                `<td class="mono">${numero(f.palavras)}</td><td class="mono">${f.palavras_por_minuto} ppm</td>` +
-                `<td class="tenue">${escapar(f.termos.join(", "))}</td></tr>`
-            )
-            .join("") +
-          `</table></div>`
-      );
-    }
-
     const tecnicas = [
       ["Arquivo", meta.filename || "—"],
       ["Container", info.container || "—"],
@@ -830,13 +1021,34 @@
       ["Perfil", resultado.profile],
       ["Vocabulário aplicado", (resultado.vocabulary || []).join(", ") || "—"],
     ];
-    secoes.push(
-      `<div class="bloco"><h3>Detalhes técnicos</h3><table class="tabela">` +
-        tecnicas.map(([n, v]) => `<tr><td>${n}</td><td class="mono">${escapar(String(v))}</td></tr>`).join("") +
-        `</table></div>`
-    );
 
-    $("conteudoDados").innerHTML = secoes.join("");
+    const tabela = (titulo, itens) =>
+      `<section class="secao"><span class="sobrancelha secao-titulo">${titulo}</span>` +
+      itens
+        .map(
+          ([n, v]) =>
+            `<div class="dado-linha"><span>${n}</span>` +
+            `<span class="mono">${escapar(String(v))}</span></div>`
+        )
+        .join("") +
+      `</section>`;
+
+    const direita = [tabela("A gravação em números", linhas), tabela("Detalhes técnicos", tecnicas)];
+    if (!esquerda.length) {
+      esquerda.push(direita.shift());
+    }
+
+    $("conteudoDados").innerHTML =
+      `<div class="duas-colunas"><div class="coluna">${esquerda.join("")}</div>` +
+      `<div class="coluna">${direita.join("")}</div></div>`;
+  }
+
+  // O nome do falante recebe a mesma cor em toda a tela; a lista da
+  // diarização é a única fonte que carrega o índice de cor.
+  function classeFalante(nome) {
+    const falantes = (estado.resultado && (estado.resultado.diarization || {}).falantes) || [];
+    const ficha = falantes.find((f) => f.nome === nome);
+    return ficha ? ` s${ficha.id % CORES_FALANTE}` : "";
   }
 
   function realcar(texto, alvo) {
@@ -845,6 +1057,7 @@
     return escapado.replace(new RegExp(padrao, "gi"), (m) => `<mark>${m}</mark>`);
   }
 
+  // ---------- downloads ----------
   function montarMenuDownloads() {
     const menu = $("menuBaixar");
     const itens = estado.formatos.length
@@ -854,8 +1067,7 @@
       itens
         .map((f) => `<button type="button" class="menu-item" data-fmt="${f.id}">${escapar(f.label)}<span>${f.ext}</span></button>`)
         .join("") +
-      '<div class="menu-separador"></div>' +
-      '<button type="button" class="menu-item" data-fmt="__zip">Todos os formatos<span>.zip</span></button>';
+      '<button type="button" class="menu-item separado" data-fmt="__zip">Todos os formatos<span>.zip</span></button>';
 
     menu.querySelectorAll(".menu-item").forEach((botao) =>
       botao.addEventListener("click", () => {
@@ -864,16 +1076,22 @@
           ? `/api/download/${estado.jobId}`
           : `/api/download/${estado.jobId}/${fmt}`;
         window.location.href = url;
-        menu.classList.add("oculto");
+        fecharMenu();
       })
     );
   }
 
+  function fecharMenu() {
+    $("menuBaixar").classList.add("oculto");
+    $("btnBaixar").parentElement.classList.remove("aberto");
+  }
+
   $("btnBaixar").addEventListener("click", (e) => {
     e.stopPropagation();
-    $("menuBaixar").classList.toggle("oculto");
+    const escondido = $("menuBaixar").classList.toggle("oculto");
+    $("btnBaixar").parentElement.classList.toggle("aberto", !escondido);
   });
-  document.addEventListener("click", () => $("menuBaixar").classList.add("oculto"));
+  document.addEventListener("click", fecharMenu);
 
   $("btnCopiar").addEventListener("click", () => {
     navigator.clipboard
@@ -903,7 +1121,7 @@
     }
     painel.classList.remove("oculto");
     audio.src = `/api/media/${estado.jobId}`;
-    audio.playbackRate = parseFloat($("selVelocidade").value);
+    audio.playbackRate = estado.velocidade;
     estado.trechoAtivo = -1;
     requestAnimationFrame(desenharOnda);
   }
@@ -924,29 +1142,33 @@
     if (!canvas || !estado.onda.length) return;
     const escala = window.devicePixelRatio || 1;
     const largura = canvas.clientWidth || 600;
-    const altura = canvas.clientHeight || 54;
-    if (canvas.width !== largura * escala) {
-      canvas.width = largura * escala;
-      canvas.height = altura * escala;
+    const altura = canvas.clientHeight || 44;
+    if (canvas.width !== Math.round(largura * escala)) {
+      canvas.width = Math.round(largura * escala);
+      canvas.height = Math.round(altura * escala);
     }
     const ctx = canvas.getContext("2d");
     ctx.setTransform(escala, 0, 0, escala, 0, 0);
     ctx.clearRect(0, 0, largura, altura);
 
     const estilo = getComputedStyle(document.documentElement);
-    const corTocada = estilo.getPropertyValue("--acento").trim() || "#4f8cff";
-    const corRestante = estilo.getPropertyValue("--borda-forte").trim() || "#33405a";
+    const corTocada = estilo.getPropertyValue("--tinta").trim() || "#1c1b18";
+    const corRestante = estilo.getPropertyValue("--linha-media").trim() || "#d8d3c6";
     const total = audio.duration || (estado.resultado && estado.resultado.duration) || 1;
     const progresso = (audio.currentTime || 0) / total;
 
-    const barras = Math.min(estado.onda.length, Math.floor(largura / 3));
+    const passoPx = 4;
+    const barras = Math.max(1, Math.min(estado.onda.length, Math.floor(largura / passoPx)));
     const passo = estado.onda.length / barras;
     for (let i = 0; i < barras; i++) {
       const valor = estado.onda[Math.floor(i * passo)] || 0;
-      const h = Math.max(2, valor * (altura - 6));
-      const x = i * 3;
+      const h = Math.max(2, valor * (altura - 4));
+      const x = i * passoPx;
       ctx.fillStyle = i / barras <= progresso ? corTocada : corRestante;
-      ctx.fillRect(x, (altura - h) / 2, 2, h);
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x, (altura - h) / 2, 2, h, 1);
+      else ctx.rect(x, (altura - h) / 2, 2, h);
+      ctx.fill();
     }
   }
 
@@ -966,30 +1188,60 @@
     const indice = segmentos.findIndex((s) => atual >= s.start && atual <= s.end);
     if (indice !== estado.trechoAtivo) {
       estado.trechoAtivo = indice;
-      document.querySelectorAll(".trecho.tocando").forEach((el) => el.classList.remove("tocando"));
-      const alvo = $("listaTrechos").querySelector(`[data-indice="${indice}"]`);
-      if (alvo) {
-        alvo.classList.add("tocando");
-        // Rolar um painel escondido faria a página inteira pular sem motivo.
-        if ($("abaTrechos").classList.contains("ativo")) {
-          alvo.scrollIntoView({ block: "nearest", behavior: "smooth" });
-        }
-      }
+      realcarTrechoAtivo(indice, segmentos[indice]);
     }
   });
 
-  audio.addEventListener("play", () => ($("btnPlay").textContent = "⏸"));
-  audio.addEventListener("pause", () => ($("btnPlay").textContent = "▶"));
+  function realcarTrechoAtivo(indice, segmento) {
+    document.querySelectorAll(".trecho.tocando").forEach((el) => el.classList.remove("tocando"));
+    const alvo = $("listaTrechos").querySelector(`[data-indice="${indice}"]`);
+    if (alvo) {
+      alvo.classList.add("tocando");
+      // Rolar um painel escondido faria a página inteira pular sem motivo.
+      if ($("abaTrechos").classList.contains("ativo")) {
+        alvo.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+
+    // No texto corrido, o bloco que está tocando fica escuro e o resto recua.
+    const texto = $("textoCompleto");
+    texto.querySelectorAll(".texto-bloco.ativo").forEach((el) => el.classList.remove("ativo"));
+    if (!segmento) {
+      texto.classList.remove("tem-ativo");
+      return;
+    }
+    const blocos = (estado.resultado && estado.resultado.dialogue) || [];
+    const bloco = blocos.findIndex((b) => segmento.start >= b.start && segmento.start <= b.end);
+    const el = bloco !== -1 ? texto.querySelector(`[data-bloco="${bloco}"]`) : null;
+    texto.classList.toggle("tem-ativo", Boolean(el));
+    if (el) el.classList.add("ativo");
+  }
+
+  audio.addEventListener("play", () => {
+    $("btnPlay").classList.add("tocando");
+    $("btnPlay").setAttribute("aria-label", "Pausar");
+  });
+  audio.addEventListener("pause", () => {
+    $("btnPlay").classList.remove("tocando");
+    $("btnPlay").setAttribute("aria-label", "Reproduzir");
+  });
   $("btnPlay").addEventListener("click", () => (audio.paused ? audio.play() : audio.pause()));
-  $("selVelocidade").addEventListener("change", (e) => (audio.playbackRate = parseFloat(e.target.value)));
+
+  function definirVelocidade(indice) {
+    const i = Math.min(VELOCIDADES.length - 1, Math.max(0, indice));
+    estado.velocidade = VELOCIDADES[i];
+    audio.playbackRate = estado.velocidade;
+    $("btnVelocidade").textContent = velocidadeTexto(estado.velocidade);
+  }
+
+  $("btnVelocidade").addEventListener("click", () => {
+    const atual = VELOCIDADES.indexOf(estado.velocidade);
+    definirVelocidade((atual + 1) % VELOCIDADES.length);
+  });
 
   function mudarVelocidade(delta) {
-    const opcoes = Array.from($("selVelocidade").options).map((o) => parseFloat(o.value));
-    const atual = opcoes.indexOf(parseFloat($("selVelocidade").value));
-    const novo = Math.min(opcoes.length - 1, Math.max(0, atual + delta));
-    $("selVelocidade").value = String(opcoes[novo]);
-    audio.playbackRate = opcoes[novo];
-    avisar(`Velocidade ${String(opcoes[novo]).replace(".", ",")}×`);
+    definirVelocidade(VELOCIDADES.indexOf(estado.velocidade) + delta);
+    avisar(`Velocidade ${velocidadeTexto(estado.velocidade)}`);
   }
 
   function pularTrecho(direcao) {
@@ -1019,19 +1271,31 @@
     }, 180);
   });
 
+  function posicionarIndicadorAbas() {
+    const abas = document.querySelectorAll(".aba");
+    if (!abas.length) return;
+    const indice = Array.from(abas).findIndex((b) => b.classList.contains("ativa"));
+    const fatia = 100 / abas.length;
+    const indicador = $("abaIndicador");
+    indicador.style.width = `${fatia}%`;
+    indicador.style.left = `${Math.max(0, indice) * fatia}%`;
+  }
+
   function trocarAba(id) {
     document.querySelectorAll(".aba").forEach((b) => b.classList.toggle("ativa", b.dataset.aba === id));
     document.querySelectorAll(".painel").forEach((p) => p.classList.toggle("ativo", p.id === id));
+    posicionarIndicadorAbas();
   }
   document.querySelectorAll(".aba").forEach((botao) =>
     botao.addEventListener("click", () => trocarAba(botao.dataset.aba))
   );
+  window.addEventListener("resize", posicionarIndicadorAbas);
 
   // ---------- histórico ----------
   async function abrirHistorico() {
     const lista = $("listaHistorico");
-    lista.innerHTML = '<p class="tenue">Carregando...</p>';
-    mostrarTela("telaHistorico");
+    lista.innerHTML = '<p class="vazio">Carregando…</p>';
+    abrirSobreposicao("telaHistorico");
     try {
       const [{ jobs }, totais] = await Promise.all([
         (await fetch("/api/jobs?limit=200")).json(),
@@ -1043,27 +1307,31 @@
         : "";
 
       if (!jobs.length) {
-        lista.innerHTML = '<p class="tenue">Nenhuma transcrição registrada ainda.</p>';
+        lista.innerHTML = '<p class="vazio">Nenhuma transcrição registrada ainda.</p>';
         return;
       }
       lista.innerHTML = "";
-      jobs.forEach((j) => {
-        const selo =
-          j.status === "concluido" ? "selo-ok" : j.status === "erro" ? "selo-erro" : "selo-neutro";
+      jobs.forEach((j, i) => {
+        const classe = j.status === "concluido" ? "ok" : j.status === "erro" ? "erro" : "";
+        const rotulo = ESTADOS[j.status] || j.status;
         const extras = [
+          new Date(j.created_at * 1000).toLocaleString("pt-BR"),
           j.model,
           j.elapsed ? formatarTempo(j.elapsed) : null,
           j.speakers ? `${j.speakers} falantes` : null,
         ].filter(Boolean);
         const item = document.createElement("div");
         item.className = "hist-item";
+        item.style.animationDelay = `${Math.min(i, 8) * 0.04}s`;
         item.innerHTML =
           `<div class="hist-dados"><strong>${escapar(j.filename)}</strong>` +
-          `<span class="tenue">${new Date(j.created_at * 1000).toLocaleString("pt-BR")} · ${escapar(extras.join(" · "))}</span></div>` +
+          `<span class="mono">${escapar(extras.join(" · "))}</span></div>` +
           `<div class="hist-acoes">` +
-          `<span class="selo ${selo}">${j.status}</span>` +
-          (j.status === "concluido" ? `<button type="button" class="btn btn-suave btn-pequeno" data-abrir="${j.job_id}">Abrir</button>` : "") +
-          `<button type="button" class="btn-icone" data-remover="${j.job_id}" title="Excluir">🗑</button></div>`;
+          `<span class="hist-estado ${classe}">${escapar(rotulo)}</span>` +
+          (j.status === "concluido"
+            ? `<button type="button" class="btn btn-contorno btn-pequeno" data-abrir="${j.job_id}">Abrir</button>`
+            : "") +
+          `<button type="button" class="hist-remover" data-remover="${j.job_id}" title="Excluir">Excluir</button></div>`;
         lista.appendChild(item);
       });
 
@@ -1078,60 +1346,52 @@
         })
       );
     } catch (erro) {
-      lista.innerHTML = '<p class="tenue">Não foi possível carregar o histórico.</p>';
+      lista.innerHTML = '<p class="vazio">Não foi possível carregar o histórico.</p>';
     }
   }
 
   $("btnHistorico").addEventListener("click", abrirHistorico);
-  $("btnFecharHistorico").addEventListener("click", () =>
-    mostrarTela(estado.resultado ? "telaResultado" : "telaEnvio")
-  );
 
   // ---------- busca global ----------
+  const DICA_BUSCA =
+    '<p class="paleta-dica">Acentos são ignorados (sera encontra será), prefixos funcionam ' +
+    "(contrat encontra contratação) e aspas procuram a frase exata.</p>";
+
   let temporizadorGlobal;
-  $("btnBuscaGlobal").addEventListener("click", () => {
-    mostrarTela("telaBusca");
+  function abrirBuscaGlobal() {
+    abrirSobreposicao("telaBusca");
     $("campoBuscaGlobal").focus();
-  });
-  $("btnFecharBusca").addEventListener("click", () =>
-    mostrarTela(estado.resultado ? "telaResultado" : "telaEnvio")
-  );
+    $("campoBuscaGlobal").select();
+  }
+  $("btnBuscaGlobal").addEventListener("click", abrirBuscaGlobal);
 
   $("campoBuscaGlobal").addEventListener("input", (e) => {
     clearTimeout(temporizadorGlobal);
     const termo = e.target.value.trim();
     const alvo = $("resultadosBusca");
     if (termo.length < 2) {
-      alvo.innerHTML = "";
+      alvo.innerHTML = DICA_BUSCA;
       return;
     }
     temporizadorGlobal = setTimeout(async () => {
-      alvo.innerHTML = '<p class="tenue">Procurando...</p>';
+      alvo.innerHTML = '<p class="paleta-vazio">Procurando…</p>';
       try {
         const dados = await (await fetch(`/api/search?q=${encodeURIComponent(termo)}`)).json();
         const itens = dados.resultados || [];
         if (!itens.length) {
-          alvo.innerHTML = '<p class="tenue">Nada encontrado.</p>';
+          alvo.innerHTML = '<p class="paleta-vazio">Nada encontrado.</p>';
           return;
         }
-        const porArquivo = new Map();
-        itens.forEach((r) => {
-          if (!porArquivo.has(r.job_id)) porArquivo.set(r.job_id, { arquivo: r.arquivo, itens: [] });
-          porArquivo.get(r.job_id).itens.push(r);
-        });
-
-        alvo.innerHTML = Array.from(porArquivo, ([jobId, grupo]) =>
-          `<div class="bloco"><h3>${escapar(grupo.arquivo)} <span class="tenue">${grupo.itens.length} ocorrência(s)</span></h3>` +
-          `<ul class="lista-tempo">` +
-          grupo.itens
-            .map(
-              (r) =>
-                `<li><button type="button" class="ir" data-job="${jobId}" data-inicio="${r.start}">` +
-                `${formatarTempo(r.start)}</button> ${r.trecho}</li>`
-            )
-            .join("") +
-          `</ul></div>`
-        ).join("");
+        alvo.innerHTML = itens
+          .map(
+            (r, i) =>
+              `<button type="button" class="achado" data-job="${r.job_id}" data-inicio="${r.start}" ` +
+              `style="animation-delay:${(Math.min(i, 10) * 0.03).toFixed(2)}s">` +
+              `<span class="mono">${formatarTempo(r.start)}</span>` +
+              `<span class="achado-corpo"><p>${r.trecho}</p>` +
+              `<span class="achado-arquivo">${escapar(r.arquivo)}</span></span></button>`
+          )
+          .join("");
 
         alvo.querySelectorAll("[data-job]").forEach((botao) =>
           botao.addEventListener("click", async () => {
@@ -1140,42 +1400,43 @@
           })
         );
       } catch (erro) {
-        alvo.innerHTML = '<p class="tenue">A busca falhou.</p>';
+        alvo.innerHTML = '<p class="paleta-vazio">A busca falhou.</p>';
       }
     }, 260);
   });
 
   // ---------- atalhos ----------
-  const modal = $("modalAtalhos");
-  $("btnAtalhos").addEventListener("click", () => modal.classList.remove("oculto"));
-  $("btnFecharAtalhos").addEventListener("click", () => modal.classList.add("oculto"));
-  modal.addEventListener("click", (e) => {
-    if (e.target === modal) modal.classList.add("oculto");
-  });
+  $("btnAtalhos").addEventListener("click", () => abrirSobreposicao("modalAtalhos"));
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
-      modal.classList.add("oculto");
-      $("menuBaixar").classList.add("oculto");
+      fecharSobreposicoes();
+      fecharMenu();
       return;
     }
     const digitando =
       ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName) || e.target.isContentEditable;
     if (digitando || e.ctrlKey || e.metaKey || e.altKey) return;
 
+    if (e.key === "h" || e.key === "H") return abrirHistorico();
+    if (e.key === "g" || e.key === "G") return abrirBuscaGlobal();
+    if (e.key === "?") {
+      return $("modalAtalhos").classList.contains("oculto")
+        ? abrirSobreposicao("modalAtalhos")
+        : fecharSobreposicoes();
+    }
+    if (alguemAberto()) return;
+
     const noResultado = !$("telaResultado").classList.contains("oculto");
 
-    if (e.key === " " && audio.src && noResultado) {
-      e.preventDefault();
-      audio.paused ? audio.play() : audio.pause();
-    }
-    if (e.key === "t" || e.key === "T") $("btnTema").click();
-    if (e.key === "h" || e.key === "H") abrirHistorico();
-    if (e.key === "g" || e.key === "G") $("btnBuscaGlobal").click();
-    if (e.key === "?") modal.classList.toggle("oculto");
     if (e.key === "/") {
       e.preventDefault();
       $("campoBusca").focus();
+      return;
+    }
+    if (e.key === " " && audio.src && noResultado) {
+      e.preventDefault();
+      audio.paused ? audio.play() : audio.pause();
     }
     if (!audio.src) return;
     if (e.key === "ArrowLeft") audio.currentTime = Math.max(0, audio.currentTime - 5);
@@ -1196,5 +1457,6 @@
     }
   });
 
+  desenharArquivos();
   carregarSistema();
 })();

@@ -8,6 +8,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+aviso_gpu() { echo "[!!] Falhou. O programa vai rodar na CPU, mais devagar."; }
+
 VENV=".venv"
 PY="$VENV/bin/python"
 
@@ -48,6 +50,18 @@ if [ "$precisa_instalar" -eq 1 ]; then
     "$PY" -m pip install -r requirements.txt
   fi
   cp requirements.txt "$VENV/requirements.lock"
+
+  # O driver da NVIDIA nao traz o cuBLAS nem o cuDNN, e o CTranslate2 so tenta
+  # abri-los no primeiro bloco de audio: sem eles a transcricao morre no meio.
+  # Sao 1,3 GB, entao ficam num requirements a parte e so entram onde ha placa.
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    echo "[..] Placa NVIDIA encontrada. Instalando as bibliotecas de GPU..."
+    if command -v uv >/dev/null 2>&1; then
+      uv pip install --python "$PY" -r requirements-gpu.txt || aviso_gpu
+    else
+      "$PY" -m pip install -r requirements-gpu.txt || aviso_gpu
+    fi
+  fi
 fi
 
 if ! command -v ffmpeg >/dev/null 2>&1; then

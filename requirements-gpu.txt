@@ -1,0 +1,12 @@
+# Bibliotecas de cálculo da NVIDIA, instaladas pelo iniciar.bat / iniciar.sh
+# somente quando existe uma placa na máquina.
+#
+# O driver da NVIDIA sozinho não basta: o CTranslate2 (motor por baixo do
+# faster-whisper) carrega o cuBLAS e o cuDNN em tempo de execução, e quem nunca
+# instalou o CUDA Toolkit não os tem em lugar nenhum. Sem eles a transcrição
+# falha no primeiro bloco de áudio com "Library cublas64_12.dll is not found".
+#
+# São cerca de 1,3 GB — por isso ficam fora do requirements.txt, que precisa
+# continuar leve para quem vai rodar na CPU.
+nvidia-cublas-cu12>=12.3
+nvidia-cudnn-cu12>=9,<10

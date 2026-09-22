@@ -26,6 +26,68 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional
 
+
+def _registrar_bibliotecas_cuda() -> None:
+    """Deixa o cuBLAS e o cuDNN instalados via pip visíveis para o CTranslate2.
+
+    Quem tem placa NVIDIA mas nunca instalou o CUDA Toolkit não tem as DLLs em
+    lugar nenhum do PATH. Os pacotes `nvidia-cublas-cu12` e `nvidia-cudnn-cu12`
+    trazem essas DLLs para dentro do ambiente, mas as deixam num canto do
+    site-packages onde o carregador do Windows não procura — e o CTranslate2 só
+    tenta abri-las no primeiro bloco de áudio, o que transforma a falta delas
+    numa transcricão que morre no meio em vez de num erro na partida. Registrar
+    o caminho aqui, antes de qualquer import do motor, evita as duas coisas.
+    """
+    import sysconfig
+
+    # purelib aponta para o site-packages do ambiente em uso; os.__file__ nao
+    # serve porque num venv ele aponta para a instalacao base do Python.
+    raiz = os.path.join(sysconfig.get_paths()["purelib"], "nvidia")
+    if not os.path.isdir(raiz):
+        return
+
+    achados = []
+    for pacote in sorted(os.listdir(raiz)):
+        pasta = os.path.join(raiz, pacote, "bin")
+        if os.path.isdir(pasta):
+            achados.append(pasta)
+
+    if not achados:
+        return
+
+    # PATH é o que o LoadLibrary do CTranslate2 consulta; add_dll_directory
+    # cobre as dependências que essas DLLs carregam entre si.
+    os.environ["PATH"] = os.pathsep.join(achados + [os.environ.get("PATH", "")])
+    if hasattr(os, "add_dll_directory"):
+        for pasta in achados:
+            try:
+                os.add_dll_directory(pasta)
+            except OSError:
+                pass
+
+
+def _bibliotecas_cuda_ausentes() -> list:
+    """Nomes das DLLs de cálculo que o CTranslate2 exige e não consegue abrir.
+
+    Só faz sentido no Windows: no Linux o carregador resolve pelo rpath do
+    próprio pacote e a lista sai sempre vazia.
+    """
+    if os.name != "nt":
+        return []
+
+    import ctypes
+
+    ausentes = []
+    for dll in ("cublas64_12.dll", "cudnn64_9.dll"):
+        try:
+            ctypes.CDLL(dll)
+        except OSError:
+            ausentes.append(dll)
+    return ausentes
+
+
+_registrar_bibliotecas_cuda()
+
 from faster_whisper import BatchedInferencePipeline, WhisperModel
 
 import analysis
@@ -125,12 +187,30 @@ class Transcriber:
     # --- Hardware -------------------------------------------------------
     @staticmethod
     def _detect_device() -> tuple:
-        """Usa GPU quando existir; senão int8 na CPU (instruções AVX2/AVX512)."""
+        """Usa GPU quando existir e funcionar; senão int8 na CPU (AVX2/AVX512).
+
+        Contar as placas não basta: o driver pode estar presente e as
+        bibliotecas de cálculo não. Nesse caso o CTranslate2 aceita o
+        `device="cuda"`, carrega o modelo sem reclamar e só falha no primeiro
+        bloco de áudio — depois de o usuário ter esperado o download do modelo
+        e o tratamento do arquivo. Conferir as DLLs na partida custa
+        milissegundos e troca esse tombo tardio por uma queda silenciosa para a
+        CPU, que é lenta mas entrega o resultado.
+        """
         try:
             import ctranslate2
 
             if ctranslate2.get_cuda_device_count() > 0:
-                return "cuda", "float16"
+                falta = _bibliotecas_cuda_ausentes()
+                if falta:
+                    logger.warning(
+                        "GPU encontrada, mas %s nao pode ser carregada. "
+                        "Usando a CPU. Para ligar a GPU: pip install "
+                        "nvidia-cublas-cu12 nvidia-cudnn-cu12",
+                        ", ".join(falta),
+                    )
+                else:
+                    return "cuda", "float16"
         except Exception:  # ctranslate2 sem suporte a CUDA compilado
             pass
         return "cpu", "int8"

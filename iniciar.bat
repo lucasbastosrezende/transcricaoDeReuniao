@@ -70,6 +70,20 @@ if errorlevel 1 (
     exit /b 1
 )
 copy /y requirements.txt ".venv\requirements.lock" > NUL
+:: -------------------------------------------------------------------- GPU
+:: O driver da NVIDIA nao traz o cuBLAS nem o cuDNN, e o CTranslate2 so tenta
+:: abri-los no primeiro bloco de audio: sem eles a transcricao morre no meio.
+:: Sao 1,3 GB, entao ficam num requirements a parte e so entram onde ha placa.
+where nvidia-smi > NUL 2>&1
+if %errorlevel% equ 0 (
+    echo [..] Placa NVIDIA encontrada. Instalando as bibliotecas de GPU...
+    if exist "%UV%" (
+        "%UV%" pip install --python "%PY%" -r requirements-gpu.txt
+    ) else (
+        "%PY%" -m pip install -r requirements-gpu.txt
+    )
+    if errorlevel 1 echo [!!] Falhou. O programa vai rodar na CPU, mais devagar.
+)
 goto FFMPEG
 
 :CONFERIR_DEPENDENCIAS
