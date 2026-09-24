@@ -21,6 +21,15 @@ class TestTexto:
         ]
         assert "Falante 1: Bom dia." in exporters.build_txt(resultado)
 
+    def test_txt_cru_so_tem_o_texto(self, resultado):
+        resultado["dialogue"] = [
+            {"speaker": "Falante 1", "speaker_id": 0, "start_str": "00:00:00", "texto": "Bom dia."},
+        ]
+        texto = exporters.build_txt_raw(resultado)
+        assert texto == resultado["plain_text"].strip() + "\n"
+        assert "Falante" not in texto
+        assert not re.search(r"\d{2}:\d{2}", texto)
+
     def test_txt_com_tempos(self, resultado):
         linhas = exporters.build_txt_with_timestamps(resultado).strip().split("\n")
         assert len(linhas) == len(resultado["segments"])
@@ -133,7 +142,7 @@ class TestDocumentos:
 class TestEscritaEmLote:
     def test_gera_todos_os_formatos(self, resultado, tmp_path):
         caminhos = exporters.write_all(resultado, str(tmp_path), "reuniao")
-        assert set(caminhos) >= {"txt", "srt", "vtt", "ass", "csv", "tsv", "json", "md", "html", "docx", "pdf"}
+        assert set(caminhos) >= {"txt", "txt_cru", "srt", "vtt", "ass", "csv", "tsv", "json", "md", "html", "docx", "pdf"}
         assert all(os.path.exists(caminho) for caminho in caminhos.values())
 
     def test_respeita_a_lista_pedida(self, resultado, tmp_path):

@@ -21,6 +21,7 @@ import ptbr
 # Rótulo, extensão e tipo MIME de cada formato oferecido na interface.
 FORMATS = {
     "txt": ("Texto com parágrafos", ".txt", "text/plain; charset=utf-8"),
+    "txt_cru": ("Texto cru (só as palavras)", ".txt", "text/plain; charset=utf-8"),
     "txt_timestamps": ("Texto com marcações de tempo", ".txt", "text/plain; charset=utf-8"),
     "srt": ("Legenda SRT", ".srt", "application/x-subrip; charset=utf-8"),
     "vtt": ("Legenda WebVTT", ".vtt", "text/vtt; charset=utf-8"),
@@ -37,6 +38,7 @@ FORMATS = {
 
 SUFFIXES = {
     "txt": "_transcricao",
+    "txt_cru": "_texto_cru",
     "txt_timestamps": "_transcricao_com_tempos",
     "srt": "_legendas",
     "vtt": "_legendas",
@@ -104,6 +106,11 @@ def build_txt(result: Dict[str, Any]) -> str:
             for block in blocks
         ) + "\n"
     return "\n\n".join(block["texto"] for block in blocks) + "\n"
+
+
+def build_txt_raw(result: Dict[str, Any]) -> str:
+    """Só o que foi dito: sem tempos, sem falantes, sem cabeçalho, sem parágrafos."""
+    return (result.get("plain_text") or "").strip() + "\n"
 
 
 def build_txt_with_timestamps(result: Dict[str, Any]) -> str:
@@ -604,6 +611,7 @@ def write_all(result: Dict[str, Any], output_dir: str, base_name: str,
 
     text_builders = {
         "txt": lambda: build_txt(result),
+        "txt_cru": lambda: build_txt_raw(result),
         "txt_timestamps": lambda: build_txt_with_timestamps(result),
         "srt": lambda: build_srt(result),
         "vtt": lambda: build_vtt(result),

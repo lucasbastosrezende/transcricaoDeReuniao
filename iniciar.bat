@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 > NUL
-setlocal EnableDelayedExpansion
+setlocal
 title Transcritor de Videos e Audios - Portugues do Brasil
 
 cd /d "%~dp0"
@@ -106,6 +106,14 @@ if %errorlevel% neq 0 (
     )
 )
 
+:: ------------------------------------------------------------ Outro script
+:: "iniciar.bat transcricao_crua.py" ou "iniciar.bat cli.py a.mp4" rodam o
+:: script pedido no ambiente ja preparado, sem subir o servidor.
+if "%~1"=="" goto VERIFICAR
+"%PY%" %*
+exit /b
+
+:VERIFICAR
 :: --------------------------------------------------------------- Verifica
 echo.
 "%PY%" test_setup.py

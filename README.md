@@ -11,6 +11,29 @@ Abre em <http://localhost:8000>. Na primeira execução o script cria o ambiente
 Python, instala as dependências e, se necessário, o FFmpeg. Em Linux e macOS,
 use `./iniciar.sh`.
 
+### Jeito mais fácil: `rodar-transcricao.exe`
+
+Dê dois cliques no `rodar-transcricao.exe`, na raiz do projeto. Ele abre um menu:
+
+| Opção | O que faz |
+|---|---|
+| **1** Transcrição completa | Abre a interface no navegador (falantes, resumo, legendas, Word, PDF…) |
+| **2** Transcrição crua | Abre uma janela para escolher os arquivos e grava **só o texto** em `.txt` — sem minutagem, sem falantes, sem cabeçalho. É a mais rápida |
+| **3** Abrir pasta | Abre `outputs/`, onde ficam as transcrições |
+
+Também dá para **arrastar um vídeo ou áudio para cima do `.exe`**: ele faz a
+transcrição crua direto, sem menu. O texto sai em `outputs/texto_cru/<nome>.txt`.
+
+O `.exe` só chama o `iniciar.bat`; a fonte está em `launcher/` e é recompilada
+com `launcher\compilar.bat`. Sem ele, o equivalente é:
+
+```
+iniciar.bat transcricao_crua.py                 (abre a janela de seleção)
+iniciar.bat transcricao_crua.py reuniao.mp4     (direto)
+```
+
+Na interface web, o mesmo resultado aparece como o formato **Texto cru**.
+
 ---
 
 ## O que ele entrega
